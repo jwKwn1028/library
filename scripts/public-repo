@@ -1,0 +1,530 @@
+#!/usr/bin/env python3
+"""Audit or export the intentionally public portion of this repository."""
+
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+
+PUBLIC_FILES = {
+    Path(".github/workflows/ci.yml"),
+    Path(".gitattributes"),
+    Path(".githooks/pre-commit"),
+    Path(".githooks/pre-push"),
+    Path(".gitignore"),
+    Path("AGENTS.md"),
+    Path("CLAUDE.md"),
+    Path("LICENSE"),
+    Path("README.md"),
+    Path("SECURITY.md"),
+    Path("docs/usage.md"),
+    Path("examples/bibliography-inventory.typ"),
+    Path("examples/chapter-bibliographies.typ"),
+    Path("examples/citation-cheatsheet.typ"),
+    Path("examples/first-citation.typ"),
+    Path("examples/reading-notes.typ"),
+    Path("examples/references.bib"),
+    Path("examples/with-backreferences.typ"),
+    Path("paperlib/__init__.py"),
+    Path("paperlib/bibtex.py"),
+    Path("paperlib/catalog.py"),
+    Path("paperlib/media.py"),
+    Path("paperlib/validation.py"),
+    Path("ruff.toml"),
+    Path("schemas/intake-manifest.schema.json"),
+    Path("scripts/init-library"),
+    Path("scripts/install-hooks"),
+    Path("scripts/export-bibliography"),
+    Path("scripts/intake-papers"),
+    Path("scripts/public-repo"),
+    Path("scripts/test"),
+    Path("scripts/validate-library.sh"),
+    Path("skills/paper-library-intake/SKILL.md"),
+    Path("skills/paper-library-intake/agents/openai.yaml"),
+    Path("skills/paper-library-intake/references/intake-contract.md"),
+    Path("skills/paper-library-intake/scripts/intake_papers.py"),
+    Path("templates/library.bib"),
+    Path("templates/main.typ"),
+    Path("tests/__init__.py"),
+    Path("tests/test_export_bibliography.py"),
+    Path("tests/test_intake_formats.py"),
+    Path("tests/test_public_repo.py"),
+    Path("tests/test_validation.py"),
+}
+PUBLIC_BIBLIOGRAPHIES = {
+    Path("examples/references.bib"),
+    Path("templates/library.bib"),
+}
+PRIVATE_ROOT_FILES = {
+    Path("main.typ"),
+    Path("library.bib"),
+    Path("PaperLibrary.pdf"),
+}
+BLOCKED_NAMES = {
+    ".env",
+    "credentials",
+    "credentials.json",
+    "id_dsa",
+    "id_ed25519",
+    "id_rsa",
+    "secrets.json",
+}
+BLOCKED_SUFFIXES = {
+    ".db",
+    ".key",
+    ".p12",
+    ".pem",
+    ".pfx",
+    ".sqlite",
+}
+MAX_PUBLIC_FILE_BYTES = 2 * 1024 * 1024
+GENERIC_USERNAMES = {"admin", "nobody", "root", "runner", "ubuntu", "user"}
+LIBRARY_MEDIA_SUFFIXES = {".epub", ".mobi", ".pdf"}
+BIBTEX_ENTRY_RE = re.compile(rb"(?m)^[ \t]*@[A-Za-z]+\{")
+BIBTEX_LIBRARY_FIELD_RE = re.compile(rb"(?im)^[ \t]*(?:file|keywords)[ \t]*=")
+CATALOG_LIBRARY_LINK_RE = re.compile(
+    rb'#link\(\s*"[^"]+\.(?:epub|mobi|pdf)"\s*,?\s*\)', flags=re.IGNORECASE
+)
+CATALOG_CITATION_RE = re.compile(rb"(?m)@[a-z]+[0-9]{4}[a-z0-9]+")
+
+
+class PublicRepoError(RuntimeError):
+    """A privacy or export precondition failed."""
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Audit or export the privacy-safe public repository surface."
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("audit", help="verify every publishable file")
+    export_parser = subparsers.add_parser(
+        "export", help="copy only audited public files to an empty directory"
+    )
+    export_parser.add_argument("destination", type=Path)
+    return parser.parse_args()
+
+
+def repository_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ["git", "-C", str(root), *arguments],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def is_git_repository(root: Path) -> bool:
+    return run_git(root, "rev-parse", "--git-dir").returncode == 0
+
+
+def git_publishable_files(root: Path) -> list[Path]:
+    result = run_git(
+        root,
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "-z",
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise PublicRepoError(f"could not enumerate Git files: {detail}")
+    return sorted(
+        Path(value.decode("utf-8", errors="strict"))
+        for value in result.stdout.split(b"\0")
+        if value
+    )
+
+
+def git_index_entries(root: Path) -> list[tuple[Path, str]]:
+    result = run_git(root, "ls-files", "--stage", "-z")
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise PublicRepoError(f"could not enumerate the Git index: {detail}")
+    entries: list[tuple[Path, str]] = []
+    for record in result.stdout.split(b"\0"):
+        if not record:
+            continue
+        metadata, encoded_path = record.split(b"\t", 1)
+        encoded_mode, _object_id, _stage = metadata.split(b" ", 2)
+        entries.append(
+            (
+                Path(encoded_path.decode("utf-8", errors="strict")),
+                encoded_mode.decode("ascii", errors="strict"),
+            )
+        )
+    return sorted(entries)
+
+
+def exported_files(root: Path) -> list[Path]:
+    files: list[Path] = []
+    for candidate in root.rglob("*"):
+        relative = candidate.relative_to(root)
+        if ".git" in relative.parts:
+            continue
+        if candidate.is_symlink() or candidate.is_file():
+            files.append(relative)
+    return sorted(files)
+
+
+def publishable_files(root: Path) -> list[Path]:
+    if is_git_repository(root):
+        return git_publishable_files(root)
+    return exported_files(root)
+
+
+def is_allowed_path(relative: Path) -> bool:
+    return Path(relative.as_posix()) in PUBLIC_FILES
+
+
+def ignored_by_git(root: Path, relative: Path) -> bool:
+    result = run_git(root, "check-ignore", "--quiet", "--no-index", relative.as_posix())
+    return result.returncode == 0
+
+
+def check_ignore_policy(root: Path, errors: list[str]) -> None:
+    if not is_git_repository(root):
+        return
+
+    private_examples = (
+        Path("main.typ"),
+        Path("library.bib"),
+        Path("PaperLibrary.pdf"),
+        Path("Library/PrivateTopic/ExamplePaper.pdf"),
+        Path("Library/PrivateTopic/ExampleBook.epub"),
+        Path("Library/PrivateTopic/ExampleBook.mobi"),
+        Path("Library/PrivateTopic/metadata.json"),
+        Path("exports/library.ris"),
+        Path("Inbox/downloaded-citation.bibtex"),
+        Path(".paper-library.lock"),
+    )
+    for relative in private_examples:
+        if not ignored_by_git(root, relative):
+            errors.append(f".gitignore does not protect {relative.as_posix()}")
+
+    for relative in PUBLIC_BIBLIOGRAPHIES:
+        if ignored_by_git(root, relative):
+            errors.append(f"public sample/template is ignored: {relative.as_posix()}")
+
+
+def sensitive_patterns() -> list[tuple[str, re.Pattern[bytes]]]:
+    patterns: list[tuple[str, re.Pattern[bytes]]] = [
+        (
+            "absolute home-directory path",
+            re.compile(rb"/(?:home|Users)/[A-Za-z0-9._-]+/"),
+        ),
+        (
+            "email address",
+            re.compile(
+                rb"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+                rb"[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+            ),
+        ),
+        ("private key", re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+        ("AWS access key", re.compile(rb"(?:AKIA|ASIA)[0-9A-Z]{16}")),
+        ("GitHub token", re.compile(rb"gh[pousr]_[A-Za-z0-9]{30,}")),
+        ("OpenAI API key", re.compile(rb"sk-[A-Za-z0-9_-]{20,}")),
+    ]
+
+    user = os.environ.get("USER", "").strip()
+    if len(user) >= 4 and user.casefold() not in GENERIC_USERNAMES:
+        encoded_user = re.escape(user.encode("utf-8"))
+        patterns.append(
+            (
+                "local username",
+                re.compile(
+                    rb"(?<![A-Za-z0-9])" + encoded_user + rb"(?![A-Za-z0-9])",
+                    flags=re.IGNORECASE,
+                ),
+            )
+        )
+    return patterns
+
+
+def public_safe_identity_email(email: str) -> bool:
+    folded = email.strip().casefold()
+    if folded.count("@") != 1 or any(character.isspace() for character in folded):
+        return False
+    return (
+        "noreply" in folded
+        or folded.endswith("@example.invalid")
+        or folded.endswith("@example.test")
+    )
+
+
+def check_public_path(relative: Path, origin: str, errors: list[str]) -> None:
+    normalized = Path(relative.as_posix())
+    label = f"{relative.as_posix()} ({origin})"
+
+    if normalized in PRIVATE_ROOT_FILES:
+        errors.append(f"private local state would be published: {label}")
+    if not is_allowed_path(normalized):
+        errors.append(f"path is outside the public allowlist: {label}")
+    if normalized.suffix.lower() in LIBRARY_MEDIA_SUFFIXES:
+        errors.append(f"library media file would be published: {label}")
+    if (
+        normalized.suffix.lower() in {".bib", ".bibtex"}
+        and normalized not in PUBLIC_BIBLIOGRAPHIES
+    ):
+        errors.append(f"non-example bibliography would be published: {label}")
+    if (
+        normalized.name.lower() in BLOCKED_NAMES
+        or normalized.suffix.lower() in BLOCKED_SUFFIXES
+    ):
+        errors.append(f"credential-like file would be published: {label}")
+
+
+def check_public_data(
+    relative: Path,
+    data: bytes,
+    origin: str,
+    patterns: list[tuple[str, re.Pattern[bytes]]],
+    errors: list[str],
+) -> None:
+    label = f"{relative.as_posix()} ({origin})"
+    if len(data) > MAX_PUBLIC_FILE_BYTES:
+        errors.append(f"public file exceeds 2 MiB: {label}")
+        return
+    if b"\0" in data:
+        errors.append(f"binary file is outside the public contract: {label}")
+        return
+    if relative == Path("templates/library.bib") and BIBTEX_ENTRY_RE.search(data):
+        errors.append(f"bibliography template contains a real record: {label}")
+    if relative == Path("examples/references.bib") and BIBTEX_LIBRARY_FIELD_RE.search(
+        data
+    ):
+        errors.append(f"example bibliography contains local library fields: {label}")
+    if relative == Path("templates/main.typ") and CATALOG_LIBRARY_LINK_RE.search(data):
+        errors.append(f"catalog template contains a library-file link: {label}")
+    if relative == Path("templates/main.typ") and CATALOG_CITATION_RE.search(data):
+        errors.append(f"catalog template contains a real citation: {label}")
+    for finding, pattern in patterns:
+        if pattern.search(data):
+            errors.append(f"possible {finding}: {label}")
+
+
+def audit_git_index(
+    root: Path,
+    patterns: list[tuple[str, re.Pattern[bytes]]],
+    errors: list[str],
+) -> None:
+    for relative, mode in git_index_entries(root):
+        check_public_path(relative, "Git index", errors)
+        if mode == "120000":
+            errors.append(f"symlink is not allowed: {relative.as_posix()} (Git index)")
+        result = run_git(root, "show", f":{relative.as_posix()}")
+        if result.returncode != 0:
+            errors.append(f"cannot inspect Git index blob: {relative.as_posix()}")
+            continue
+        check_public_data(relative, result.stdout, "Git index", patterns, errors)
+
+
+def audit_git_history(
+    root: Path,
+    patterns: list[tuple[str, re.Pattern[bytes]]],
+    errors: list[str],
+) -> None:
+    revisions = run_git(root, "rev-list", "--all")
+    if revisions.returncode != 0:
+        detail = revisions.stderr.decode("utf-8", errors="replace").strip()
+        raise PublicRepoError(f"could not enumerate Git history: {detail}")
+
+    blob_cache: dict[str, bytes | None] = {}
+    for commit in revisions.stdout.decode("ascii", errors="strict").splitlines():
+        tree = run_git(root, "ls-tree", "-r", "-z", "--full-tree", commit)
+        if tree.returncode != 0:
+            raise PublicRepoError(f"could not inspect Git tree {commit}")
+        for record in tree.stdout.split(b"\0"):
+            if not record:
+                continue
+            metadata, encoded_path = record.split(b"\t", 1)
+            mode, object_type, encoded_object = metadata.split(b" ", 2)
+            relative = Path(encoded_path.decode("utf-8", errors="strict"))
+            check_public_path(relative, "Git history", errors)
+            if mode == b"120000":
+                errors.append(
+                    f"symlink is not allowed: {relative.as_posix()} (Git history)"
+                )
+            if object_type != b"blob":
+                continue
+
+            object_id = encoded_object.decode("ascii", errors="strict")
+            if object_id not in blob_cache:
+                blob = run_git(root, "cat-file", "blob", object_id)
+                if blob.returncode != 0:
+                    blob_cache[object_id] = None
+                else:
+                    blob_cache[object_id] = blob.stdout
+            data = blob_cache[object_id]
+            if data is None:
+                errors.append(f"cannot inspect historical blob: {relative.as_posix()}")
+                continue
+            # Content rules are path-sensitive, so a cached blob must still be
+            # checked at every historical path where Git exposes it.
+            check_public_data(relative, data, "Git history", patterns, errors)
+
+
+def audit_git_identities(root: Path, errors: list[str]) -> None:
+    result = run_git(
+        root,
+        "log",
+        "--all",
+        "--format=%an%x00%ae%x00%cn%x00%ce",
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise PublicRepoError(f"could not inspect Git identities: {detail}")
+
+    local_user = os.environ.get("USER", "").strip().casefold()
+    unsafe_roles: set[str] = set()
+    local_name_roles: set[str] = set()
+    for record in result.stdout.decode("utf-8", errors="strict").splitlines():
+        parts = record.split("\0")
+        if len(parts) != 4:
+            raise PublicRepoError("could not parse a Git history identity record")
+        author_name, author_email, committer_name, committer_email = parts
+        for role, name, email in (
+            ("author", author_name, author_email),
+            ("committer", committer_name, committer_email),
+        ):
+            if not public_safe_identity_email(email):
+                unsafe_roles.add(role)
+            if (
+                len(local_user) >= 4
+                and local_user not in GENERIC_USERNAMES
+                and re.search(
+                    rf"(?<![a-z0-9]){re.escape(local_user)}(?![a-z0-9])",
+                    name.casefold(),
+                )
+            ):
+                local_name_roles.add(role)
+    for role in sorted(unsafe_roles):
+        errors.append(f"Git history contains a non-noreply {role} email (Git history)")
+    for role in sorted(local_name_roles):
+        errors.append(f"Git history contains the local username as {role} name")
+
+
+def audit_configured_git_identities(root: Path, errors: list[str]) -> None:
+    local_user = os.environ.get("USER", "").strip().casefold()
+    for role, variable in (
+        ("author", "GIT_AUTHOR_IDENT"),
+        ("committer", "GIT_COMMITTER_IDENT"),
+    ):
+        result = run_git(root, "var", variable)
+        if result.returncode != 0:
+            continue
+        identity = result.stdout.decode("utf-8", errors="strict").strip()
+        match = re.fullmatch(r"(.*) <([^<>]+)> \d+ [+-]\d{4}", identity)
+        if not match:
+            errors.append(f"could not parse configured Git {role} identity")
+            continue
+        name, email = match.groups()
+        if not public_safe_identity_email(email):
+            errors.append(f"configured Git {role} email is not a no-reply address")
+        if (
+            len(local_user) >= 4
+            and local_user not in GENERIC_USERNAMES
+            and re.search(
+                rf"(?<![a-z0-9]){re.escape(local_user)}(?![a-z0-9])",
+                name.casefold(),
+            )
+        ):
+            errors.append(f"configured Git {role} name contains the local username")
+
+
+def audit(root: Path) -> list[Path]:
+    files = publishable_files(root)
+    errors: list[str] = []
+    patterns = sensitive_patterns()
+
+    check_ignore_policy(root, errors)
+
+    if is_git_repository(root):
+        audit_git_index(root, patterns, errors)
+        audit_git_history(root, patterns, errors)
+        audit_git_identities(root, errors)
+        audit_configured_git_identities(root, errors)
+
+    for relative in files:
+        absolute = root / relative
+        check_public_path(relative, "working tree", errors)
+
+        if absolute.is_symlink():
+            errors.append(f"symlink is not allowed: {relative.as_posix()}")
+            continue
+        if not absolute.is_file():
+            errors.append(
+                f"publishable path is not a regular file: {relative.as_posix()}"
+            )
+            continue
+
+        try:
+            data = absolute.read_bytes()
+        except OSError as error:
+            errors.append(f"cannot inspect {relative.as_posix()}: {error}")
+            continue
+        check_public_data(relative, data, "working tree", patterns, errors)
+
+    if errors:
+        formatted = "\n".join(f"  - {error}" for error in sorted(set(errors)))
+        raise PublicRepoError(f"public-repository audit failed:\n{formatted}")
+
+    return files
+
+
+def export(root: Path, destination: Path) -> None:
+    files = audit(root)
+    destination = destination.expanduser().resolve()
+
+    if destination == root or destination.is_relative_to(root):
+        raise PublicRepoError(
+            "export destination must be outside the source repository"
+        )
+    if destination.exists():
+        if not destination.is_dir():
+            raise PublicRepoError(
+                f"export destination is not a directory: {destination}"
+            )
+        if any(destination.iterdir()):
+            raise PublicRepoError(f"export destination is not empty: {destination}")
+    else:
+        destination.mkdir(parents=True)
+
+    for relative in files:
+        source = root / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target, follow_symlinks=False)
+
+    audit(destination)
+    print(f"Exported {len(files)} audited public files to {destination}")
+
+
+def main() -> int:
+    arguments = parse_args()
+    root = repository_root()
+    try:
+        if arguments.command == "audit":
+            files = audit(root)
+            print(f"OK: {len(files)} public files passed the privacy audit.")
+        else:
+            export(root, arguments.destination)
+    except (OSError, PublicRepoError, UnicodeError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

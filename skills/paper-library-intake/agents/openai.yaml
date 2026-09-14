@@ -1,0 +1,4 @@
+interface:
+  display_name: "Paper Library Intake"
+  short_description: "Catalog documents and complete pending downloads safely"
+  default_prompt: "Use $paper-library-intake to catalog new local documents, add verified pending recommendations, or attach downloaded files to pending records."

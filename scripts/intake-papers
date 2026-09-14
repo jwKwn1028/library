@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+intake_script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+intake_library_root=$(cd -- "$intake_script_dir/.." && pwd)
+
+exec python3 \
+  "$intake_library_root/skills/paper-library-intake/scripts/intake_papers.py" \
+  "$@" --root "$intake_library_root"

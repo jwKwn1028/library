@@ -1,0 +1,60 @@
+% SAMPLE REFERENCES: replace these with your own library or Zotero export.
+% This is BibLaTeX-format data, not a LaTeX program. No Biber step is needed.
+% Keep citation keys stable; the .typ files refer to them by name.
+% Braces around TeXbook protect its capitalization.
+
+% Journal article: first installment, July 1948, pages 379-423.
+% Metadata source: https://doi.org/10.1002/j.1538-7305.1948.tb01338.x
+@article{shannon1948communication,
+  author       = {Shannon, Claude E.},
+  title        = {A Mathematical Theory of Communication},
+  journaltitle = {The Bell System Technical Journal},
+  date         = {1948-07},
+  volume       = {27},
+  number       = {3},
+  pages        = {379--423},
+  doi          = {10.1002/j.1538-7305.1948.tb01338.x}
+}
+
+% Book. Metadata source: https://www-cs-faculty.stanford.edu/~knuth/abcde.html
+@book{knuth1984texbook,
+  author       = {Knuth, Donald E.},
+  title        = {The {TeXbook}},
+  date         = {1984},
+  publisher    = {Addison-Wesley},
+  location     = {Reading, Massachusetts},
+  isbn         = {0-201-13448-9}
+}
+
+% Conference paper. Metadata source is the proceedings page below.
+@inproceedings{vaswani2017attention,
+  author       = {Vaswani, Ashish and Shazeer, Noam and Parmar, Niki and
+                  Uszkoreit, Jakob and Jones, Llion and Gomez, Aidan N. and
+                  Kaiser, \L{}ukasz and Polosukhin, Illia},
+  title        = {Attention Is All You Need},
+  booktitle    = {Advances in Neural Information Processing Systems},
+  date         = {2017},
+  volume       = {30},
+  publisher    = {Curran Associates, Inc.},
+  url          = {https://proceedings.neurips.cc/paper/2017/hash/3f5ee243547dee91fbd053c1c4a845aa-Abstract.html}
+}
+
+% Web page. A doubled brace pair preserves a corporate author as one name.
+% No publication date is invented for this continuously maintained page.
+@online{typst-bibliography,
+  author       = {{Typst}},
+  title        = {Bibliography},
+  organization = {Typst Documentation},
+  url          = {https://typst.app/docs/reference/model/bibliography/},
+  urldate      = {2026-09-11}
+}
+
+% Intentionally not cited by main.typ. It appears when include-uncited = true,
+% or when you cite it explicitly. The cheatsheet does cite it.
+@online{typst-cite,
+  author       = {{Typst}},
+  title        = {Cite},
+  organization = {Typst Documentation},
+  url          = {https://typst.app/docs/reference/model/cite/},
+  urldate      = {2026-09-11}
+}

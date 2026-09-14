@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""Export the private canonical BibLaTeX database as portable RIS metadata."""
+
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from paperlib.bibtex import (  # noqa: E402
+    BibEntry,
+    BibtexError,
+    parse_bibliography,
+    plain_text,
+)
+
+RIS_TYPES = {
+    "article": "JOUR",
+    "book": "BOOK",
+    "booklet": "BOOK",
+    "conference": "CPAPER",
+    "inbook": "CHAP",
+    "incollection": "CHAP",
+    "inproceedings": "CPAPER",
+    "manual": "GEN",
+    "mastersthesis": "THES",
+    "misc": "GEN",
+    "online": "ELEC",
+    "patent": "PAT",
+    "periodical": "JOUR",
+    "phdthesis": "THES",
+    "proceedings": "CONF",
+    "report": "RPRT",
+    "techreport": "RPRT",
+    "thesis": "THES",
+    "unpublished": "UNPB",
+}
+
+
+class ExportError(RuntimeError):
+    """A bibliography parsing or export failure."""
+
+
+def repository_root() -> Path:
+    return REPOSITORY_ROOT
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Export root library.bib as UTF-8 RIS metadata compatible with "
+            "Zotero and EndNote. Local file paths are omitted."
+        )
+    )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=repository_root(),
+        help="paper-library root (default: repository containing this script)",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("exports/library.ris"),
+        help="RIS destination, relative to --root unless absolute",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace an existing output file",
+    )
+    return parser.parse_args()
+
+
+def split_top_level(value: str, separator: str) -> list[str]:
+    pieces: list[str] = []
+    start = 0
+    depth = 0
+    escaped = False
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if character == "\\":
+            escaped = True
+            index += 1
+            continue
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth = max(0, depth - 1)
+        elif depth == 0 and value.startswith(separator, index):
+            pieces.append(value[start:index])
+            index += len(separator)
+            start = index
+            continue
+        index += 1
+    pieces.append(value[start:])
+    return pieces
+
+
+def split_authors(value: str) -> list[str]:
+    pieces: list[str] = []
+    start = 0
+    depth = 0
+    escaped = False
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if character == "\\":
+            escaped = True
+            index += 1
+            continue
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            conjunction = re.match(r"\s+and\s+", value[index:])
+            if conjunction:
+                pieces.append(value[start:index])
+                index += conjunction.end()
+                start = index
+                continue
+        index += 1
+    pieces.append(value[start:])
+    return pieces
+
+
+def add_line(lines: list[str], tag: str, value: str | None) -> None:
+    if value:
+        lines.append(f"{tag}  - {value}")
+
+
+def render_entry(entry: BibEntry) -> list[str]:
+    fields = entry.fields
+    lines = [f"TY  - {RIS_TYPES.get(entry.entry_type, 'GEN')}"]
+    add_line(lines, "ID", entry.citation_key)
+
+    for author in split_authors(fields.get("author", "")):
+        add_line(lines, "AU", plain_text(author))
+    for editor in split_authors(fields.get("editor", "")):
+        add_line(lines, "ED", plain_text(editor))
+
+    add_line(lines, "TI", plain_text(fields.get("title", "")))
+    add_line(
+        lines,
+        "JF",
+        plain_text(fields.get("journaltitle", fields.get("journal", ""))),
+    )
+    add_line(lines, "T2", plain_text(fields.get("booktitle", "")))
+    add_line(lines, "T3", plain_text(fields.get("series", "")))
+
+    date = plain_text(fields.get("date", fields.get("year", "")), typography=False)
+    date_match = re.match(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?", date)
+    if date_match:
+        add_line(lines, "PY", date_match.group(1))
+        add_line(lines, "DA", "/".join(part for part in date_match.groups() if part))
+
+    add_line(lines, "VL", plain_text(fields.get("volume", ""), typography=False))
+    add_line(
+        lines,
+        "IS",
+        plain_text(fields.get("number", fields.get("issue", "")), typography=False),
+    )
+
+    pages = plain_text(fields.get("pages", ""), typography=False)
+    page_parts = re.split(r"\s*--?\s*", pages, maxsplit=1)
+    if pages:
+        add_line(lines, "SP", page_parts[0])
+        if len(page_parts) == 2:
+            add_line(lines, "EP", page_parts[1])
+
+    publisher = fields.get(
+        "publisher", fields.get("institution", fields.get("school", ""))
+    )
+    add_line(lines, "PB", plain_text(publisher))
+    add_line(
+        lines,
+        "CY",
+        plain_text(fields.get("location", fields.get("address", ""))),
+    )
+    add_line(lines, "ET", plain_text(fields.get("edition", "")))
+    add_line(lines, "SE", plain_text(fields.get("chapter", "")))
+    add_line(lines, "LA", plain_text(fields.get("language", "")))
+
+    add_line(lines, "SN", plain_text(fields.get("isbn", ""), typography=False))
+    add_line(lines, "SN", plain_text(fields.get("issn", ""), typography=False))
+    add_line(lines, "DO", plain_text(fields.get("doi", ""), typography=False))
+    add_line(lines, "UR", plain_text(fields.get("url", ""), typography=False))
+
+    for keyword in split_top_level(fields.get("keywords", ""), ","):
+        add_line(lines, "KW", plain_text(keyword))
+
+    add_line(lines, "AB", plain_text(fields.get("abstract", "")))
+    add_line(lines, "N1", plain_text(fields.get("note", "")))
+    lines.append("ER  -")
+    return lines
+
+
+def render_ris(entries: list[BibEntry]) -> bytes:
+    lines: list[str] = []
+    for entry in entries:
+        if lines:
+            lines.append("")
+        lines.extend(render_entry(entry))
+    return ("\r\n".join(lines) + "\r\n").encode("utf-8")
+
+
+def write_output(path: Path, data: bytes, force: bool) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not force:
+        try:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError as error:
+            raise ExportError(
+                f"output already exists; use --force to replace it: {path}"
+            ) from error
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
+        return
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        root = args.root.expanduser().resolve()
+        if not root.is_dir():
+            raise ExportError(f"library root does not exist: {root}")
+
+        source = root / "library.bib"
+        if not source.is_file():
+            raise ExportError(f"canonical bibliography not found: {source}")
+
+        output = args.output.expanduser()
+        if not output.is_absolute():
+            output = root / output
+        output = output.resolve()
+        if output.suffix.lower() != ".ris":
+            raise ExportError("--output must end in .ris")
+        if output == source.resolve():
+            raise ExportError("output cannot replace library.bib")
+
+        try:
+            bibliography = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            raise ExportError(f"cannot read {source}: {error}") from error
+        entries = parse_bibliography(bibliography)
+        write_output(output, render_ris(entries), args.force)
+
+        try:
+            display_output = output.relative_to(root)
+        except ValueError:
+            display_output = output
+        print(
+            f"Exported {len(entries)} record(s) to {display_output} "
+            "(UTF-8 RIS; local file paths omitted)."
+        )
+        return 0
+    except (BibtexError, ExportError, OSError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

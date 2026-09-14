@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+hook_repo_root=$(git rev-parse --show-toplevel)
+exec "$hook_repo_root/scripts/public-repo" audit

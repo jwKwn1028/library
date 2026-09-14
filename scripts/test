@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+test_script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+test_root=$(cd -- "$test_script_dir/.." && pwd)
+cd -- "$test_root"
+
+for required_tool in python3 ruff shellcheck typst; do
+  if ! command -v "$required_tool" >/dev/null 2>&1; then
+    printf 'ERROR: required command not found: %s\n' "$required_tool" >&2
+    exit 1
+  fi
+done
+
+python3 -m json.tool schemas/intake-manifest.schema.json >/dev/null
+python3 -m unittest discover -s tests -v
+ruff check paperlib scripts/export-bibliography scripts/public-repo \
+  skills/paper-library-intake/scripts/intake_papers.py tests
+ruff format --check paperlib scripts/export-bibliography scripts/public-repo \
+  skills/paper-library-intake/scripts/intake_papers.py tests
+shellcheck scripts/init-library scripts/install-hooks scripts/intake-papers \
+  scripts/test scripts/validate-library.sh .githooks/pre-commit .githooks/pre-push
+./scripts/public-repo audit
+
+if [[ -f main.typ && -f library.bib ]]; then
+  ./scripts/validate-library.sh
+elif [[ -f main.typ || -f library.bib ]]; then
+  printf 'ERROR: private root state is incomplete; expected both main.typ and library.bib\n' >&2
+  exit 1
+fi

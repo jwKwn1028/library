@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+hooks_script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+hooks_repo_root=$(cd -- "$hooks_script_dir/.." && pwd)
+
+if ! git -C "$hooks_repo_root" rev-parse --git-dir >/dev/null 2>&1; then
+  printf '%s\n' 'ERROR: this directory is not a Git repository' >&2
+  exit 1
+fi
+
+git -C "$hooks_repo_root" config core.hooksPath .githooks
+printf '%s\n' 'Installed repository hooks from .githooks.'

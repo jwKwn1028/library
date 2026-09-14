@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+init_script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+init_library_root=$(cd -- "$init_script_dir/.." && pwd)
+
+initialize_file() {
+  local template_path=$1
+  local local_path=$2
+
+  if [[ -e "$local_path" ]]; then
+    printf 'Kept existing local file: %s\n' "${local_path#"$init_library_root/"}"
+    return
+  fi
+
+  cp -- "$template_path" "$local_path"
+  printf 'Created private local file: %s\n' "${local_path#"$init_library_root/"}"
+}
+
+initialize_file "$init_library_root/templates/main.typ" "$init_library_root/main.typ"
+initialize_file "$init_library_root/templates/library.bib" "$init_library_root/library.bib"
+
+if [[ -d "$init_library_root/Library" ]]; then
+  printf '%s\n' 'Kept existing private media directory: Library'
+else
+  mkdir -- "$init_library_root/Library"
+  printf '%s\n' 'Created private media directory: Library'
+fi
+
+printf '%s\n' 'Local paper-library state is ready and ignored by Git.'
