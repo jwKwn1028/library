@@ -20,9 +20,9 @@
 - Public seed files live in `templates/`; synthetic demonstrations live in
   `examples/`.
 - Root `main.typ`, root `library.bib`, the entire root `Library/` tree,
-  `PaperLibrary.pdf`, intake manifests, and downloaded citation sidecars are
-  private local state and must remain ignored by Git. Store canonical
-  PDF/EPUB/MOBI files beneath `Library/`.
+  `Catalog.pdf`, `Inbox/`, JSON intake reports, intake manifests, and
+  downloaded citation sidecars are private local state and must remain ignored
+  by Git. Store canonical PDF/EPUB/MOBI files beneath `Library/`.
 - If root `main.typ` or `library.bib` is absent, run `scripts/init-library`.
   It copies the public templates without overwriting existing local files and
   creates the ignored `Library/` media root when absent.
@@ -32,6 +32,9 @@
 - Never force-add an ignored file. Before any commit, push, release, or public
   export, run `scripts/public-repo audit`. Prefer publishing a tree made by
   `scripts/public-repo export <empty-directory>`.
+- In a standalone exported tree, the audit may ignore only known generated
+  Python and lint/test cache directories; every other unexpected path must
+  still fail the public allowlist.
 - Do not write names, email addresses, usernames, home-directory paths, account
   identifiers, credentials, or real bibliography records into public files.
 
@@ -40,14 +43,20 @@
 - The private root `library.bib` is the canonical bibliography for local
   library items.
 - The private root `main.typ` is the canonical local catalog source.
-- `PaperLibrary.pdf` is generated from `main.typ` and must remain in the library
+- Its quoted `catalog-updated` value is transactional private state. Every
+  successful intake apply sets it to the current local calendar date; dry runs
+  and rolled-back applies must leave it unchanged.
+- `Catalog.pdf` is generated from `main.typ` and must remain in the library
   root so relative library-file links work.
 - `Library/` is the fixed physical root for canonical media and topic
   directories. It is not part of the conceptual taxonomy or BibTeX keywords.
 - RIS files produced by `scripts/export-bibliography` are private derived
   metadata, never a second source of truth.
+- JSON reports produced by `scripts/intake-papers --report-json` are private
+  provenance snapshots, never a bibliography or catalog source of truth.
 - `templates/main.typ` and `templates/library.bib` are sanitized initialization
-  seeds, not mirrors or backups of private state.
+  seeds, not mirrors or backups of private state. Its `catalog-author` and
+  `catalog-updated` defaults must remain empty.
 - `examples/references.bib` is sample data used only by `examples/`.
 - `docs/usage.md` is the public, comprehensive user guide. Keep it generic and
   update it whenever command behavior, manifest behavior, template invariants,
@@ -77,9 +86,10 @@ When the document for a pending record arrives, inspect it and use an
 `attach: true` manifest item with the existing citation key, `source_file`, and
 `canonical_filename`. Do not submit it as a second record or edit the paired
 BibTeX/catalog paths by hand. The dry run and apply update only the existing
-empty `file` field and unlinked catalog item while preserving its key and
-metadata. Use `scripts/intake-papers status --pending` (optionally `--json`) to
-list outstanding records.
+empty `file` field and replace the catalog title's reference-section fallback
+with a direct media link while preserving its key and metadata. Use
+`scripts/intake-papers status --pending` (optionally `--json`) to list
+outstanding records.
 
 ## Intake workflow
 
@@ -87,26 +97,36 @@ For each new PDF, EPUB, or MOBI item:
 
 1. Confirm root `main.typ` and `library.bib` exist; otherwise run
    `scripts/init-library`.
-2. Inspect the document's embedded metadata and title page to recover the
+2. If a document is outside the repository, run `scripts/stage-papers <path...>`
+   and review its dry run, then repeat with `--apply`. This copies the explicit
+   files into the ignored `Inbox/`, preserves the originals, verifies content,
+   and uses the shared library lock.
+3. Inspect the document's embedded metadata and title page to recover the
    official title, authors, publication identity, and DOI or ISBN. For PDFs,
    use `pdfinfo` and first-page `pdftotext`; for EPUB/MOBI files, use an
    available ebook reader or metadata tool.
-3. Treat supplied or downloaded BibTeX as untrusted input. Reconcile it with the
+4. Treat supplied or downloaded BibTeX as untrusted input. Reconcile it with the
    document and correct missing or conflicting fields.
-4. Obtain missing metadata from authoritative web sources when needed, following
+5. Obtain missing metadata from authoritative web sources when needed, following
    the web-metadata policy below.
-5. Determine the item's primary contribution and select the narrowest matching
+6. Determine the item's primary contribution and select the narrowest matching
    existing topic directory.
-6. Choose a short, distinctive canonical filename and stable citation key.
-7. Check for duplicate DOI, key, normalized title, local path, and file content.
-8. Create a reviewed JSON manifest as documented in
+7. Choose a short, distinctive canonical filename and stable citation key.
+8. Check for duplicate DOI, key, normalized title, local path, and file content.
+9. Create one reviewed JSON manifest per destination topic as documented in
    `skills/paper-library-intake/references/intake-contract.md`.
    The preferred form also has a public machine-readable schema at
-   `schemas/intake-manifest.schema.json`.
-9. Run `scripts/intake-papers --manifest <path>` and review the dry run.
-10. Apply with `--apply` only when every proposed move and metadata field is
-   correct. Use `--delete-sidecars` only when sidecar removal is in scope.
-11. Confirm `scripts/validate-library.sh` passes and `PaperLibrary.pdf` builds in
+   `schemas/intake-manifest.schema.json`. Record optional `metadata_sources`
+   HTTP(S) URLs when durable provenance is useful.
+10. Run `scripts/intake-papers --manifest <path>` and review the dry run. Repeat
+    `--manifest` to preflight several topics as one batch.
+11. Apply with `--apply` only when every proposed move and metadata field is
+    correct. The repeated-manifest batch is one transaction. Use
+    `--delete-sidecars` only when sidecar removal is in scope.
+12. When requested or useful for a complex batch, write a private provenance
+    snapshot with `--report-json reports/<name>.json`; use `--force-report` only
+    to replace a known report.
+13. Confirm `scripts/validate-library.sh` passes and `Catalog.pdf` builds in
     the root.
 
 The intake command takes an advisory `.paper-library.lock` for dry runs,
@@ -115,11 +135,19 @@ use a reviewed finite `--lock-timeout`.
 
 ## Web metadata and BibTeX policy
 
-Web retrieval belongs to the intake agent, not the transactional intake script.
-The script must remain deterministic, offline, and limited to reviewed manifest
-data. A separate skill is not needed unless the project later requires a true
-batch DOI resolver, authenticated reference-manager synchronization, or a
-rate-limited metadata service.
+Web metadata retrieval belongs to the intake agent, not the transactional
+intake script. `scripts/fetch-pending` is the separate network-aware acquisition
+helper for explicitly requested DOI-backed pending downloads; it may write only
+verified PDFs to ignored `Inbox/`. `intake-papers` must remain deterministic,
+offline, and limited to reviewed manifest data.
+
+Run the fetcher without `--apply` first and prefer explicit `--key` selections.
+Use `--all` only when the user requests the full pending set. Set
+`PAPER_LIBRARY_FETCH_EMAIL` at runtime when Unpaywall lookup is desired; never
+persist or print it. Do not capture browser cookies, automate institutional
+credentials, bypass access controls, or treat an HTML landing/login page as a
+document. Inspect each staged PDF before creating and applying its attachment
+manifest. Inaccessible records remain pending.
 
 Retrieve web metadata when the local document and supplied sidecar do not
 provide a complete, internally consistent record, or when the user explicitly
@@ -229,14 +257,18 @@ directory, explain the ambiguity, and suggest a future category.
 
 - Mirror the directory hierarchy with readable headings in `main.typ`.
 - Add one official title and its citation key beneath the deepest topic
-  heading. Link it to its PDF, EPUB, or MOBI file when present; otherwise leave
-  it unlinked without adding visible download-status text.
+  heading. Link the title directly to its PDF, EPUB, or MOBI file when present;
+  otherwise link it to the labeled References section without adding visible
+  download-status text. Keep the bibliography target labeled `<references>`.
 - Keep New Computer Modern Sans as the primary catalog font and the
   `korean-font` input as its Hangul fallback. Its default is
   `NanumGothicCoding`, the Korean sans-serif selected by this system's
   Fontconfig configuration; users may override it for another system.
 - Keep `library.bib` as the single bibliography source for `main.typ`.
-- Generate the catalog with `typst compile main.typ PaperLibrary.pdf` from the
+- Keep the private `catalog-author` value out of public files. Intake updates
+  only `catalog-updated`, using a human-readable local date after preflight and
+  inside the same transaction as the catalog changes.
+- Generate the catalog with `typst compile main.typ Catalog.pdf` from the
   root.
 
 ## Reference-manager export
@@ -255,6 +287,9 @@ directory, explain the ambiguity, and suggest a future category.
 
 - The validator uses the shared parser in `paperlib/`; do not add independent
   regex-based interpretations of BibTeX or catalog items.
+- `Inbox/` is a private staging area, not canonical media. The validator ignores
+  it when checking cataloged media, while intake and staging still use its files
+  for duplicate-content checks.
 - It must compare titles, citation multiplicity, topic markers, keywords,
   heading paths, attachment links, on-disk paths, media signatures, and hashes.
 - Run `scripts/test` after framework changes. It is the local equivalent of the
@@ -278,6 +313,9 @@ Report each original filename, format, canonical destination, citation key,
 corrected metadata, new category, and sidecar disposition. State whether
 validation and catalog compilation passed. If the transaction rolls back,
 report the concrete failure and do not describe the intake as complete.
+
+When a JSON intake report is produced, identify its private path and whether it
+records a dry run or successful apply. Do not publish or force-add it.
 
 For metadata-only work, report the citation keys and categories, the
 authoritative sources used, that the file paths remain empty, and which empty

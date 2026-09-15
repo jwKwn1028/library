@@ -6,7 +6,7 @@ full policy so the two instruction sets cannot drift.
 
 This public repository contains sanitized templates and examples. The working
 root `main.typ`, `library.bib`, the complete `Library/` media tree, and
-`PaperLibrary.pdf` are private Git-ignored state. Canonical PDF/EPUB/MOBI files
+`Catalog.pdf` are private Git-ignored state. Canonical PDF/EPUB/MOBI files
 live at `Library/<topic.path>/<CanonicalFilename>`. If the two root source
 files are missing, initialize them with `scripts/init-library`; it also creates
 `Library/` when absent. Never copy private content back into `templates/`.
@@ -23,23 +23,34 @@ For any request to add, organize, rename, or catalog papers or books:
 
 1. Read `skills/paper-library-intake/SKILL.md` and its linked intake contract.
 2. Run `scripts/init-library` if root `main.typ` or `library.bib` is absent.
-3. Inspect the document's title page and embedded metadata before trusting a
+3. For external files, review `scripts/stage-papers <path...>` and repeat it
+   with `--apply` to copy them into the ignored `Inbox/` while preserving the
+   originals.
+4. Inspect the document's title page and embedded metadata before trusting a
    citation export. Supported library formats are PDF, EPUB, and MOBI.
-4. Retrieve missing BibTeX metadata from authoritative web sources as an agent
+5. Retrieve missing BibTeX metadata from authoritative web sources as an agent
    task; do not add networking to the transactional intake script.
-5. Prepare and review a manifest with `scripts/intake-papers` before using
-   `--apply`.
-6. Keep the private root `library.bib` and `main.typ` as the local sources of
+6. Prepare one manifest per topic and review it with `scripts/intake-papers`
+   before using `--apply`. Repeat `--manifest` for one transactional
+   multi-topic batch. Optional `metadata_sources` and `--report-json` retain
+   provenance only in a private, Git-ignored JSON report.
+7. Keep the private root `library.bib` and `main.typ` as the local sources of
    truth.
-7. Finish by running `scripts/validate-library.sh` and rebuilding the root-level
-   `PaperLibrary.pdf`.
+8. Finish by running `scripts/validate-library.sh` and rebuilding the root-level
+   `Catalog.pdf`.
+
+A successful intake apply updates the private quoted `catalog-updated` value to
+the current local date within the same rollback boundary. Dry runs do not alter
+it. Keep the public template's `catalog-author` and `catalog-updated` defaults
+empty; never copy a private byline into public files.
 
 For an explicitly requested metadata-only reading list, verify each complete
 record from authoritative web sources, use `pending: true`, and omit
 `source_file` and `canonical_filename`. Never invent a local path or create a
-placeholder document. Pending titles stay unlinked without visible status text,
-their BibTeX `file` fields stay empty, and apply creates the empty destination
-topic directory under `Library/` for the future file.
+placeholder document. Pending titles link to the catalog's References section
+without visible status text, their BibTeX `file` fields stay empty, and apply
+creates the empty destination topic directory under `Library/` for the future
+file. Local titles link directly to their PDF, EPUB, or MOBI attachment.
 
 List pending records with `scripts/intake-papers status --pending`. When one is
 downloaded, use an `attach: true` manifest item with its existing citation key;
@@ -47,6 +58,14 @@ the transaction connects the inspected file without duplicating or rewriting
 the record. Editor-only books are valid. The preferred manifest schema is
 `schemas/intake-manifest.schema.json`, and commands use the repository's
 advisory intake lock.
+
+When the user requests downloads, use `scripts/fetch-pending --key KEY` as a
+network lookup dry run and repeat with `--apply` to stage accessible,
+identity-checked PDFs in ignored `Inbox/`. Use `--all` only when explicitly
+requested. `PAPER_LIBRARY_FETCH_EMAIL` enables Unpaywall at runtime and must
+never be stored or printed. The fetcher must not use cookies, credentials, or
+paywall bypasses and never edits canonical bibliography/catalog state; inspect
+each result and finish through the ordinary attachment manifest.
 
 Preserve New Computer Modern Sans as the primary catalog face and the
 overridable `korean-font` input as its Hangul fallback. The checked-in default
@@ -59,5 +78,6 @@ Before committing, pushing, or publishing, run `scripts/public-repo audit`.
 Never force-add ignored local library data; prefer an independently audited
 export produced by `scripts/public-repo export <empty-directory>`. Use a
 public-safe Git name and provider no-reply author/committer address because the
-audit checks configured and reachable history identities. Run `scripts/test`
-after framework changes.
+audit checks configured and reachable history identities. Standalone exports
+may ignore only known generated Python and lint/test caches; other unexpected
+paths remain audit failures. Run `scripts/test` after framework changes.

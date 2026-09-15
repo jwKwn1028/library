@@ -17,10 +17,13 @@ media root when needed.
 Generate, review, and apply an intake manifest:
 
 ```sh
+./scripts/stage-papers /path/to/document.pdf
+./scripts/stage-papers /path/to/document.pdf --apply
 ./scripts/intake-papers --write-template /tmp/paper-intake.json
 ./scripts/intake-papers --manifest /tmp/paper-intake.json
 ./scripts/intake-papers --manifest /tmp/paper-intake.json --apply
 ./scripts/intake-papers status --pending
+./scripts/fetch-pending --key author2026shorttitle
 ```
 
 Local documents are stored at
@@ -29,6 +32,10 @@ use `pending: true` and omit `source_file` and `canonical_filename`.
 Use `attach: true` in a later manifest to connect its downloaded document.
 The preferred manifest shape is documented by
 `schemas/intake-manifest.schema.json`.
+Repeat `--manifest` for an atomic multi-topic batch. Use optional
+`metadata_sources` with `--report-json reports/<name>.json` for a private
+provenance record. Each successful apply updates the catalog's private
+last-updated date.
 
 ## Validate and publish
 
@@ -36,7 +43,7 @@ Validate the private library and build its catalog:
 
 ```sh
 ./scripts/validate-library.sh
-typst compile main.typ PaperLibrary.pdf
+typst compile main.typ Catalog.pdf
 ./scripts/test
 ```
 

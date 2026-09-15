@@ -1,6 +1,6 @@
 ---
 name: paper-library-intake
-description: Intake or attach research papers and books in PDF, EPUB, or MOBI format, or add explicitly requested metadata-only reading-list records, by recovering and verifying metadata, checking duplicates, classifying items, consolidating BibTeX in library.bib, updating main.typ, validating, and rebuilding the catalog. Use for requests to add, organize, rename, recommend, complete pending downloads, or catalog research documents in this workspace; do not use for unsolicited mass reorganization of existing items.
+description: Intake or attach research papers and books in PDF, EPUB, or MOBI format, fetch accessible PDFs for pending DOI-backed records, or add explicitly requested metadata-only reading-list records, by recovering and verifying metadata, checking duplicates, classifying items, consolidating BibTeX in library.bib, updating main.typ, validating, and rebuilding the catalog. Use for requests to add, organize, rename, recommend, download, complete pending records, or catalog research documents in this workspace; do not use for unsolicited mass reorganization of existing items.
 ---
 
 # Paper Library Intake
@@ -23,6 +23,10 @@ they are not safe to infer mechanically.
    citation export. For an explicitly requested metadata-only reading list,
    verify the complete record from authoritative web sources and mark the
    manifest item `pending: true`.
+   If the files are outside the repository, stage reviewed explicit paths with
+   `./scripts/stage-papers PATH...`, inspect its dry run, then repeat with
+   `--apply`. Staging copies into the ignored `Inbox/`, preserves the
+   originals, verifies media signatures and hashes, and shares the intake lock.
 3. If local metadata is incomplete or inconsistent, retrieve metadata as an
    agent task from the publisher/DOI record, Crossref, or another authoritative
    primary source. Verify it against the document. Do not add network access to the
@@ -32,35 +36,49 @@ they are not safe to infer mechanically.
    the manifest. The preferred manifest also has a machine-readable schema at
    `../../schemas/intake-manifest.schema.json` from the repository root.
 5. Create one JSON manifest per destination subtopic. A pending item omits
-   `source_file` and `canonical_filename`; a local item requires both. Prefer
-   a temporary manifest outside the library. Generate a starter when useful:
+   `source_file` and `canonical_filename`; a local item requires both. Add
+   optional `metadata_sources` HTTP(S) URLs to retain reviewed provenance in a
+   private report. Prefer a temporary manifest outside the library. Generate a
+   starter when useful:
 
    ```sh
    ./scripts/intake-papers --write-template /tmp/paper-intake.json
    ```
 
 6. Run a dry run and inspect every proposed move, source format, key, DOI, and
-   destination:
+   destination. Repeat `--manifest` to preflight several topics as one batch;
+   every manifest must pass before anything can be applied:
 
    ```sh
-   ./scripts/intake-papers --manifest /tmp/paper-intake.json
+   ./scripts/intake-papers \
+     --manifest /tmp/topic-a.json \
+     --manifest /tmp/topic-b.json
    ```
 
 7. If the plan matches the request, apply it. `--apply` moves local library
    files to `Library/<topic.path>/` when present, creates that topic directory
    even for a pending-only manifest, appends normalized entries to
-   `library.bib`, inserts linked local citations or unlinked pending citations
-   without visible status labels into the requested `main.typ` hierarchy, runs
-   `scripts/validate-library.sh`, and atomically rebuilds `PaperLibrary.pdf` in
-   the root:
+   `library.bib`, inserts titles linked directly to local media or, while
+   pending, to the labeled References section without visible status labels,
+   runs `scripts/validate-library.sh`, and atomically rebuilds `Catalog.pdf` in
+   the root. It also sets the quoted private `catalog-updated` value to the
+   current local date. The whole repeated-manifest batch is one transaction:
 
    ```sh
-   ./scripts/intake-papers --manifest /tmp/paper-intake.json --apply
+   ./scripts/intake-papers \
+     --manifest /tmp/topic-a.json \
+     --manifest /tmp/topic-b.json \
+     --apply
    ```
 
 8. Keep source sidecars by default. Add `--delete-sidecars` only when their
    removal is explicitly within scope; deletion occurs after successful
    validation and build and participates in rollback.
+9. When durable provenance is useful, add `--report-json
+   reports/<name>.json`. The report is private, Git-ignored, and written with
+   owner-only permissions. It records the reviewed plan and
+   `metadata_sources`; an applied report is committed only after validation and
+   compilation pass. Use `--force-report` only to replace a known report.
 
 ## Complete a pending record
 
@@ -75,13 +93,40 @@ they are not safe to infer mechanically.
    `file` field and links the existing catalog item without changing its key or
    metadata.
 
+## Fetch pending PDFs
+
+Use the separate networked fetcher only when the user asks to download pending
+documents. Keep `intake-papers` offline.
+
+1. Select explicit citation keys by default and inspect the lookup-only run:
+
+   ```sh
+   ./scripts/fetch-pending --key author2026shorttitle
+   ```
+
+   Use `--all` only when the user explicitly requests the whole pending set.
+2. Repeat with `--apply` to try accessible candidates. Downloads are bounded,
+   must have a valid PDF signature/container, and must match the pending DOI or
+   title-page identity before being written as `Inbox/<citation-key>.pdf`.
+   HTML landing/login pages and mismatched documents are rejected.
+3. The fetcher uses anonymous OpenAlex open-access locations, Crossref
+   full-text links, and the DOI resolver. Set `PAPER_LIBRARY_FETCH_EMAIL` only
+   at runtime to additionally query Unpaywall; never store or print the value.
+   The helper does not use browser cookies, credentials, paywall bypasses, or
+   authenticated scraping. An inaccessible document remains pending for manual
+   download.
+4. Inspect every staged PDF, choose a reviewed canonical filename, and complete
+   the ordinary `attach: true` manifest workflow. The fetcher intentionally
+   does not edit `library.bib`, `main.typ`, or `Catalog.pdf`; the existing
+   transactional intake performs those changes.
+
 ## Guardrails
 
 - Do not use the script to recategorize or rename already cataloged items.
 - An attachment manifest is the only routine update to an existing item.
 - Keep root `main.typ`, root `library.bib`, the entire `Library/` tree,
-  generated catalogs, manifests, and citation sidecars private and Git-ignored.
-  Do not force-add them.
+  generated catalogs, `Inbox/`, reports, manifests, and citation sidecars
+  private and Git-ignored. Do not force-add them.
 - Do not bypass dry-run review. Resolve warnings or conflicts instead of
   weakening checks.
 - Preserve stable citation keys even if a display title or filename changes.

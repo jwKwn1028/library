@@ -1,12 +1,14 @@
 # Private local paper-library state
 /main.typ
 /library.bib
-/PaperLibrary.pdf
+/Catalog.pdf
 /Library/
 /exports/
 /Inbox/
+/reports/
 /intake/
 /paper-intake*.json
+*.intake-report.json
 /.paper-library.lock
 *.pdf
 *.epub

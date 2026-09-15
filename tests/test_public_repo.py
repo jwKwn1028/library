@@ -26,9 +26,9 @@ class PublicRepositoryAuditTests(unittest.TestCase):
         shutil.copy2(REPOSITORY_ROOT / "scripts/public-repo", auditor)
         auditor.chmod(0o755)
         (self.root / ".gitignore").write_text(
-            "/main.typ\n/library.bib\n/PaperLibrary.pdf\n/Library/\n"
-            "/exports/\n/Inbox/\n/.paper-library.lock\n*.pdf\n*.epub\n"
-            "*.mobi\n*.bib\n*.bibtex\n*.ris\n"
+            "/main.typ\n/library.bib\n/Catalog.pdf\n/Library/\n"
+            "/exports/\n/Inbox/\n/reports/\n/.paper-library.lock\n*.pdf\n*.epub\n"
+            "*.mobi\n*.bib\n*.bibtex\n*.ris\n*.intake-report.json\n"
             "!examples/references.bib\n!templates/library.bib\n",
             encoding="utf-8",
         )
@@ -119,6 +119,53 @@ class PublicRepositoryAuditTests(unittest.TestCase):
         self.assertIn("non-noreply author email", result.stderr)
         self.assertIn("non-noreply committer email", result.stderr)
         self.assertNotIn("private-address", result.stderr)
+
+    def test_standalone_export_audit_ignores_generated_tool_caches(self) -> None:
+        exported_directory = tempfile.TemporaryDirectory(
+            prefix="paper-library-standalone-export-"
+        )
+        self.addCleanup(exported_directory.cleanup)
+        exported_root = Path(exported_directory.name)
+        (exported_root / "scripts").mkdir()
+        auditor = exported_root / "scripts/public-repo"
+        shutil.copy2(REPOSITORY_ROOT / "scripts/public-repo", auditor)
+        (exported_root / "README.md").write_text(
+            "Synthetic public framework.\n", encoding="utf-8"
+        )
+        ruff_cache = exported_root / ".ruff_cache/0.15.22"
+        ruff_cache.mkdir(parents=True)
+        (ruff_cache / "cache-entry").write_bytes(b"\x00generated")
+        python_cache = exported_root / "paperlib/__pycache__"
+        python_cache.mkdir(parents=True)
+        (python_cache / "module.cpython-313.pyc").write_bytes(b"\x00generated")
+
+        result = subprocess.run(
+            [sys.executable, str(auditor), "audit"],
+            cwd=exported_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("2 public files passed", result.stdout)
+
+    def test_rejects_a_private_byline_in_the_catalog_template(self) -> None:
+        (self.root / "templates/main.typ").write_text(
+            '#let catalog-author = "Synthetic Person"\n'
+            '#let catalog-updated = "January 1, 2026"\n'
+            '#let bibliography-file = "library.bib"\n'
+            "#bibliography(bibliography-file)\n",
+            encoding="utf-8",
+        )
+
+        result = self.audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "catalog template contains a non-empty private byline", result.stderr
+        )
 
 
 if __name__ == "__main__":

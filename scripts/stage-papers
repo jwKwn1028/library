@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+stage_script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+stage_library_root=$(cd -- "$stage_script_dir/.." && pwd)
+
+exec python3 \
+  "$stage_library_root/skills/paper-library-intake/scripts/stage_papers.py" \
+  "$@" --root "$stage_library_root"

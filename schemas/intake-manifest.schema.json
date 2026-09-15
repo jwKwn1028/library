@@ -49,6 +49,15 @@
       "items": { "type": "string", "pattern": "\\.(bib|bibtex)$" },
       "uniqueItems": true
     },
+    "metadataSources": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "format": "uri",
+        "pattern": "^https?://"
+      },
+      "uniqueItems": true
+    },
     "fields": {
       "type": "object",
       "minProperties": 2,
@@ -107,6 +116,7 @@
         "title": { "type": "string", "minLength": 1 },
         "bib_title": { "type": "string", "minLength": 1 },
         "fields": { "$ref": "#/$defs/fields" },
+        "metadata_sources": { "$ref": "#/$defs/metadataSources" },
         "sidecars": { "$ref": "#/$defs/sidecars" }
       }
     },
@@ -122,6 +132,7 @@
         "title": { "type": "string", "minLength": 1 },
         "bib_title": { "type": "string", "minLength": 1 },
         "fields": { "$ref": "#/$defs/fields" },
+        "metadata_sources": { "$ref": "#/$defs/metadataSources" },
         "sidecars": { "$ref": "#/$defs/sidecars" }
       }
     },
@@ -139,6 +150,7 @@
         "citation_key": { "$ref": "#/$defs/citationKey" },
         "source_file": { "type": "string", "minLength": 1 },
         "canonical_filename": { "$ref": "#/$defs/canonicalFilename" },
+        "metadata_sources": { "$ref": "#/$defs/metadataSources" },
         "sidecars": { "$ref": "#/$defs/sidecars" }
       }
     }

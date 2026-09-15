@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 import json
 import fcntl
 from pathlib import Path
@@ -41,19 +42,26 @@ class IntakeFormatTests(unittest.TestCase):
     def run_manifest(
         self, manifest: dict[str, object], *arguments: str
     ) -> subprocess.CompletedProcess[str]:
-        manifest_path = self.root / "intake.json"
-        manifest_path.write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        return self.run_manifests([manifest], *arguments)
+
+    def run_manifests(
+        self, manifests: list[dict[str, object]], *arguments: str
+    ) -> subprocess.CompletedProcess[str]:
+        manifest_arguments: list[str] = []
+        for index, manifest in enumerate(manifests):
+            manifest_path = self.root / f"intake-{index}.json"
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            manifest_arguments.extend(["--manifest", str(manifest_path)])
         return subprocess.run(
             [
                 sys.executable,
                 str(INTAKE_ENGINE),
                 "--root",
                 str(self.root),
-                "--manifest",
-                str(manifest_path),
+                *manifest_arguments,
                 *arguments,
             ],
             cwd=self.root,
@@ -241,13 +249,19 @@ class IntakeFormatTests(unittest.TestCase):
 
         bibliography = (self.root / "library.bib").read_text(encoding="utf-8")
         catalog = (self.root / "main.typ").read_text(encoding="utf-8")
+        today = date.today()
+        expected_update = f"{today.strftime('%B')} {today.day}, {today.year}"
+        self.assertIn(
+            f'#let catalog-updated = "{expected_update}"',
+            catalog,
+        )
         for relative in destinations:
             self.assertIn(f"= {{{relative}}}", bibliography)
             self.assertIn(f'#link("{relative}")', catalog)
         self.assertIn("@article{example2026pdfguide,", bibliography)
         self.assertIn("@book{example2026epubguide,", bibliography)
         self.assertIn("@book{example2026mobiguide,", bibliography)
-        self.assertGreater((self.root / "PaperLibrary.pdf").stat().st_size, 0)
+        self.assertGreater((self.root / "Catalog.pdf").stat().st_size, 0)
 
         multiline_catalog = catalog
         for relative in destinations:
@@ -265,6 +279,238 @@ class IntakeFormatTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(validation.returncode, 0, validation.stderr)
+
+    def test_multi_topic_batch_and_private_provenance_report(self) -> None:
+        pdf = self.inbox / "study.pdf"
+        epub = self.inbox / "handbook.epub"
+        unrelated = self.inbox / "unrelated.mobi"
+        self.write_pdf(pdf)
+        self.write_epub(epub)
+        self.write_mobi(unrelated)
+
+        study = self.item(
+            "Inbox/study.pdf",
+            "SyntheticFoundationalStudy.pdf",
+            "example2026foundationalstudy",
+            "Synthetic foundational study",
+            entry_type="article",
+        )
+        study["metadata_sources"] = [
+            "https://doi.org/10.0000/synthetic-study",
+            "https://api.crossref.org/works/10.0000%2Fsynthetic-study",
+        ]
+        study["fields"]["doi"] = "10.0000/synthetic-study"
+        first = {
+            "topic": {
+                "path": "PeripheralEsoteric/PhilosophyOfScience",
+                "headings": ["Peripheral & Esoteric", "Philosophy of Science"],
+            },
+            "items": [study],
+        }
+        second = self.manifest(
+            [
+                self.item(
+                    "Inbox/handbook.epub",
+                    "SyntheticDigitalHandbook.epub",
+                    "example2026digitalhandbook",
+                    "Synthetic digital handbook",
+                )
+            ]
+        )
+        report = self.root / "reports/batch.json"
+
+        dry_run = self.run_manifests([first, second], "--report-json", str(report))
+        self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+        self.assertIn("BATCH 2 manifest(s)", dry_run.stdout)
+        self.assertTrue(pdf.is_file())
+        self.assertTrue(epub.is_file())
+        dry_report = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(dry_report["status"], "dry-run")
+        today = date.today()
+        expected_update = f"{today.strftime('%B')} {today.day}, {today.year}"
+        self.assertEqual(dry_report["catalog_updated"], expected_update)
+        self.assertEqual(dry_report["summary"]["manifests"], 2)
+        self.assertEqual(dry_report["summary"]["topics"], 2)
+        self.assertEqual(
+            dry_report["topics"][0]["items"][0]["metadata_sources"],
+            study["metadata_sources"],
+        )
+        self.assertEqual(report.stat().st_mode & 0o777, 0o600)
+
+        refused = self.run_manifests([first, second], "--report-json", str(report))
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("refusing to overwrite existing report", refused.stderr)
+
+        applied = self.run_manifests(
+            [first, second],
+            "--apply",
+            "--report-json",
+            str(report),
+            "--force-report",
+        )
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        self.assertIn("Applied 2 item(s) across 2 topic(s)", applied.stdout)
+        self.assertFalse(pdf.exists())
+        self.assertFalse(epub.exists())
+        self.assertTrue(unrelated.is_file())
+        self.assertTrue(
+            (
+                self.root / "Library/PeripheralEsoteric/PhilosophyOfScience/"
+                "SyntheticFoundationalStudy.pdf"
+            ).is_file()
+        )
+        self.assertTrue(
+            (
+                self.root / "Library/PeripheralEsoteric/DigitalBooks/"
+                "SyntheticDigitalHandbook.epub"
+            ).is_file()
+        )
+        report_data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(report_data["status"], "applied")
+        self.assertEqual(report_data["validation"], "passed")
+        self.assertEqual(report_data["catalog_build"], "passed")
+        self.assertEqual(report_data["summary"]["items"], 2)
+        self.assertEqual(report.stat().st_mode & 0o777, 0o600)
+        bibliography = (self.root / "library.bib").read_text(encoding="utf-8")
+        self.assertNotIn("metadata_sources", bibliography)
+        self.assertNotIn("api.crossref.org", bibliography)
+        catalog = (self.root / "main.typ").read_text(encoding="utf-8")
+        self.assertIn("== Philosophy of Science", catalog)
+
+    def test_multi_topic_preflight_rejects_cross_manifest_duplicate(self) -> None:
+        original_bib = (self.root / "library.bib").read_bytes()
+        first_item = {
+            "pending": True,
+            "citation_key": "example2026firstduplicate",
+            "entry_type": "article",
+            "title": "Synthetic duplicate work",
+            "fields": {"author": "Example, Ada", "date": "2026"},
+        }
+        second_item = {
+            "pending": True,
+            "citation_key": "researcher2026secondduplicate",
+            "entry_type": "article",
+            "title": "Synthetic duplicate work",
+            "fields": {"author": "Researcher, Ben", "date": "2026"},
+        }
+
+        result = self.run_manifests(
+            [self.manifest([first_item]), self.manifest([second_item])], "--apply"
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("duplicate normalized title", result.stderr)
+        self.assertEqual((self.root / "library.bib").read_bytes(), original_bib)
+        self.assertFalse((self.root / "Library").exists())
+
+    def test_multi_topic_preflight_rejects_reused_source_file(self) -> None:
+        source = self.inbox / "shared.pdf"
+        self.write_pdf(source)
+        first = self.item(
+            "Inbox/shared.pdf",
+            "SyntheticFirstStudy.pdf",
+            "example2026firststudy",
+            "Synthetic first study",
+            entry_type="article",
+        )
+        second = self.item(
+            "Inbox/shared.pdf",
+            "SyntheticSecondStudy.pdf",
+            "researcher2026secondstudy",
+            "Synthetic second study",
+            entry_type="article",
+        )
+
+        result = self.run_manifests(
+            [self.manifest([first]), self.manifest([second])], "--apply"
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("source file appears in more than one manifest", result.stderr)
+        self.assertTrue(source.is_file())
+        self.assertFalse((self.root / "Library").exists())
+
+    def test_topic_heading_identity_is_checked_during_dry_run(self) -> None:
+        item = {
+            "pending": True,
+            "citation_key": "example2026headingcheck",
+            "entry_type": "article",
+            "title": "Synthetic heading check",
+            "fields": {"author": "Example, Ada", "date": "2026"},
+        }
+        manifest = {
+            "topic": {
+                "path": "PeripheralEsoteric/PhilosophyOfScience",
+                "headings": ["Peripheral & Esoteric", "Philosophy of Physics"],
+            },
+            "items": [item],
+        }
+
+        result = self.run_manifest(manifest)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "must match topic.path component PhilosophyOfScience", result.stderr
+        )
+
+    def test_intake_requires_the_catalog_updated_marker(self) -> None:
+        main_path = self.root / "main.typ"
+        main_text = main_path.read_text(encoding="utf-8")
+        main_path.write_text(
+            main_text.replace('#let catalog-updated = ""\n', "", 1),
+            encoding="utf-8",
+        )
+        item = {
+            "pending": True,
+            "citation_key": "example2026missingupdatedmarker",
+            "entry_type": "article",
+            "title": "Synthetic missing update marker",
+            "fields": {"author": "Example, Ada", "date": "2026"},
+        }
+
+        result = self.run_manifest(self.manifest([item]))
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "must define exactly one quoted #let catalog-updated", result.stderr
+        )
+
+    def test_metadata_sources_require_safe_web_urls(self) -> None:
+        item = {
+            "pending": True,
+            "citation_key": "example2026metadatasource",
+            "entry_type": "article",
+            "title": "Synthetic metadata source",
+            "fields": {"author": "Example, Ada", "date": "2026"},
+            "metadata_sources": ["file:///tmp/private-record.json"],
+        }
+
+        result = self.run_manifest(self.manifest([item]))
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must be an HTTP(S) URL", result.stderr)
+
+    def test_report_rejects_a_symlinked_parent(self) -> None:
+        item = {
+            "pending": True,
+            "citation_key": "example2026symlinkreport",
+            "entry_type": "article",
+            "title": "Synthetic symlink report",
+            "fields": {"author": "Example, Ada", "date": "2026"},
+        }
+        external_reports = self.root.parent / "external-reports"
+        external_reports.mkdir()
+        (self.root / "reports").symlink_to(external_reports, target_is_directory=True)
+
+        result = self.run_manifest(
+            self.manifest([item]),
+            "--report-json",
+            str(self.root / "reports/intake.json"),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must not use a symlinked path component", result.stderr)
+        self.assertEqual(list(external_reports.iterdir()), [])
 
     def test_pending_item_requires_no_local_document(self) -> None:
         item = {
@@ -318,12 +564,12 @@ class IntakeFormatTests(unittest.TestCase):
         self.assertIn("Synthetic pending paper", catalog)
         self.assertIn("@example2026pendingpaper", catalog)
         self.assertNotIn("download pending", catalog.casefold())
-        self.assertNotIn("#link(", catalog)
+        self.assertEqual(catalog.count("#link(<references>)"), 2)
         self.assertTrue(
             (self.root / "Library/PeripheralEsoteric/DigitalBooks").is_dir()
         )
         self.assertIn("0 library files, 2 pending downloads", applied.stdout)
-        self.assertGreater((self.root / "PaperLibrary.pdf").stat().st_size, 0)
+        self.assertGreater((self.root / "Catalog.pdf").stat().st_size, 0)
 
         (self.root / "main.typ").write_text(
             catalog.replace(
@@ -399,6 +645,10 @@ class IntakeFormatTests(unittest.TestCase):
         relative = destination.relative_to(self.root).as_posix()
         self.assertIn(f"file      = {{{relative}}}", bibliography)
         self.assertIn(f'#link("{relative}")', catalog)
+        self.assertNotIn(
+            '#link(<references>)[\n    #text("Synthetic edited pending book")',
+            catalog,
+        )
         self.assertIn("editor    = {Editor, Erin}", bibliography)
         self.assertEqual(json.loads(self.run_status("--json").stdout), [])
 
@@ -611,6 +861,7 @@ class IntakeFormatTests(unittest.TestCase):
             '#let catalog-fonts = ("New Computer Modern Sans", korean-font)',
             main_text,
         )
+        self.assertIn(") <references>", main_text)
         marker = (
             "// The intake engine inserts topic headings and catalog citations here."
         )

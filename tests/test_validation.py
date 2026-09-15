@@ -27,12 +27,12 @@ VALID_CATALOG = """#let bibliography-file = "library.bib"
 
 == Digital Books
 
-- #text("Synthetic Handbook") @editor2024handbook
+- #link(<references>)[#text("Synthetic Handbook")] @editor2024handbook
 
 #bibliography(
   bibliography-file,
   title: [References],
-)
+) <references>
 """
 
 
@@ -55,6 +55,31 @@ class SemanticValidationTests(unittest.TestCase):
         self.assertEqual(result.errors, ())
         self.assertEqual((result.entries, result.files, result.pending), (1, 0, 1))
 
+    def test_rejects_pending_title_without_reference_fallback(self) -> None:
+        catalog = VALID_CATALOG.replace(
+            '#link(<references>)[#text("Synthetic Handbook")]',
+            '#text("Synthetic Handbook")',
+        )
+        (self.root / "main.typ").write_text(catalog, encoding="utf-8")
+
+        result = self.validate()
+
+        self.assertIn(
+            "pending entry editor2024handbook must link its title to the references section",
+            result.errors,
+        )
+
+    def test_rejects_missing_bibliography_reference_target(self) -> None:
+        catalog = VALID_CATALOG.replace(") <references>", ")")
+        (self.root / "main.typ").write_text(catalog, encoding="utf-8")
+
+        result = self.validate()
+
+        self.assertIn(
+            "main.typ must label its bibliography <references> exactly once",
+            result.errors,
+        )
+
     def test_at_sign_inside_title_is_not_mistaken_for_a_citation(self) -> None:
         bibliography = VALID_BIBLIOGRAPHY.replace(
             "Synthetic Handbook", "Synthetic Fe@C Handbook"
@@ -71,7 +96,8 @@ class SemanticValidationTests(unittest.TestCase):
         catalog = (self.root / "main.typ").read_text(encoding="utf-8")
         catalog = catalog.replace(
             "#bibliography(",
-            '- #text("Synthetic Handbook") @editor2024handbook\n\n#bibliography(',
+            '- #link(<references>)[#text("Synthetic Handbook")] '
+            "@editor2024handbook\n\n#bibliography(",
         )
         (self.root / "main.typ").write_text(catalog, encoding="utf-8")
 
@@ -107,7 +133,7 @@ class SemanticValidationTests(unittest.TestCase):
             "file       = {}", f"file       = {{{relative}}}"
         )
         catalog = VALID_CATALOG.replace(
-            '- #text("Synthetic Handbook")',
+            '- #link(<references>)[#text("Synthetic Handbook")]',
             f'- #link("{relative}")[#text("Synthetic Handbook")]',
         )
         (self.root / "library.bib").write_text(bibliography, encoding="utf-8")
@@ -119,6 +145,17 @@ class SemanticValidationTests(unittest.TestCase):
             any(error.startswith("invalid library media") for error in result.errors),
             result.errors,
         )
+
+    def test_private_inbox_media_is_not_treated_as_canonical_library_state(
+        self,
+    ) -> None:
+        inbox_file = self.root / "Inbox/unrelated.pdf"
+        inbox_file.parent.mkdir()
+        inbox_file.write_bytes(b"not a cataloged PDF")
+
+        result = self.validate()
+
+        self.assertEqual(result.errors, ())
 
     def test_rejects_impossible_canonical_date(self) -> None:
         bibliography = VALID_BIBLIOGRAPHY.replace(

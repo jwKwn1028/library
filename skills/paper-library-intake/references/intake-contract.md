@@ -53,7 +53,11 @@ download must still be inspected before it is attached to the record.
 
 ## Manifest
 
-The script accepts one destination topic per manifest:
+Each manifest accepts one destination topic. Repeat `--manifest` to preflight
+and apply several topic manifests as one transaction. The engine evaluates the
+manifests in command-line order against one evolving in-memory catalog, so
+cross-manifest duplicate keys, titles, DOI values, paths, and content hashes
+fail before any library state changes.
 
 The preferred `items` form is described by
 [`schemas/intake-manifest.schema.json`](../../../schemas/intake-manifest.schema.json).
@@ -78,6 +82,10 @@ bibliography, catalog, filesystem, and media contents.
       "entry_type": "book",
       "title": "The official display title",
       "bib_title": "The official display title with {Protected Acronyms}",
+      "metadata_sources": [
+        "https://doi.org/10.0000/synthetic-item",
+        "https://api.crossref.org/works/10.0000%2Fsynthetic-item"
+      ],
       "fields": {
         "author": "Author, First and Researcher, Second",
         "publisher": "Publisher Name",
@@ -150,8 +158,12 @@ Rules:
 - Paths are relative to the library root and cannot leave it.
 - `topic.path` components and `canonical_filename` must already follow the
   canonical naming rules. The canonical extension must match the source format.
-  `headings` supplies the readable Typst labels. Do not include the physical
-  `Library/` prefix in `topic.path`; the script adds it to local destinations.
+  `headings` supplies the readable Typst labels and must identify the matching
+  path components after spacing, punctuation, and letter case are ignored. This
+  permits natural labels such as `Philosophy of Science` for
+  `PhilosophyOfScience` while rejecting an unrelated heading. Do not include
+  the physical `Library/` prefix in `topic.path`; the script adds it to local
+  destinations.
 - `items` is the preferred collection key and `source_file` is the preferred
   source key. Existing manifests using `papers` and PDF-only `source_pdf`
   remain accepted for backward compatibility. Do not provide both aliases.
@@ -177,6 +189,10 @@ Rules:
   pending item receives an empty `file` value.
 - `sidecars` are informational unless `--delete-sidecars` is explicitly used.
   The script never treats downloaded sidecar metadata as authoritative.
+- `metadata_sources` is an optional array of unique HTTP(S) URLs used to verify
+  that item's metadata. It is provenance for plans and private JSON reports;
+  it is never copied into `library.bib` or `main.typ`. Do not place credentials
+  or private query data in these URLs.
 - Unknown top-level, topic, or item properties are rejected so misspelled
   fields cannot be silently ignored. `$schema` is the only optional top-level
   annotation.
@@ -184,17 +200,51 @@ Rules:
   operation fails after the finite `--lock-timeout` instead of losing an
   update.
 
+## External staging and provenance reports
+
+Use `scripts/stage-papers PATH...` when incoming documents are outside the
+repository. Its default mode is a dry run; `--apply` copies verified PDF, EPUB,
+or MOBI files into the ignored `Inbox/` without changing the originals. It
+rejects symlinks, invalid media, filename collisions, and duplicate content in
+the batch, `Inbox/`, or `Library/`. It uses the same advisory lock as intake.
+`Inbox/` is a staging area and is excluded from canonical orphan validation,
+but its files still participate in intake and staging duplicate checks.
+
+For a user-requested DOI-backed pending download, run
+`scripts/fetch-pending --key <citation-key>` before its `--apply` form. The
+networked helper may retrieve accessible candidates from Unpaywall, Crossref
+full-text metadata, anonymous OpenAlex open-access locations, or the DOI
+resolver, but writes only verified PDFs beneath `Inbox/`. Set
+`PAPER_LIBRARY_FETCH_EMAIL` at runtime to enable Unpaywall and never record that
+value. Treat unavailable, authenticated, HTML, oversized, or
+identity-mismatched responses as unresolved; do not bypass access controls.
+After download, inspect the document and use the normal reviewed attachment
+manifest. `intake-papers` remains offline and is the only command that changes
+canonical bibliography/catalog state.
+
+Pass `--report-json reports/<name>.json` to write a machine-readable, private
+record of a dry run or successful apply. Reports include manifests, topics,
+actions, normalized fields, metadata source URLs, source and destination paths,
+hashes, sidecar dispositions, and validation/build status. They are
+Git-ignored, created with owner-only permissions, and are not a bibliography or
+catalog source of truth. Existing reports are protected unless
+`--force-report` is explicit. A report produced during apply participates in
+rollback and is written only after library validation and catalog compilation
+succeed.
+
 ## Successful result
 
 Every processed item has one record in `library.bib` and one citation under
 the matching hierarchy in `main.typ`. A local item has exactly one canonical
 PDF, EPUB, or MOBI file beneath `Library/` and a linked title. A pending item
-has an empty `file` field, an unlinked title with no visible status label, and
-an empty `Library/<topic.path>/` destination directory. No placeholder media
-file is created. No DOI, key, non-empty file path, or local file content is
-duplicated. The validator passes and `PaperLibrary.pdf` is rebuilt in the
-library root.
+has an empty `file` field, a title linked to the catalog's labeled References
+section with no visible status label, and an empty `Library/<topic.path>/`
+destination directory. No placeholder media file is created. No DOI, key,
+non-empty file path, or local file content is duplicated. The validator passes
+and `Catalog.pdf` is rebuilt in the library root. The private
+`catalog-updated` value records the successful intake's local calendar date; a
+dry run or rollback does not change it.
 
 For an attachment, the prior empty `file` field becomes the canonical path and
-the prior unlinked item becomes linked. There is still exactly one BibTeX
-record and one catalog citation for the stable key.
+the prior reference-section fallback becomes a direct media link. There is
+still exactly one BibTeX record and one catalog citation for the stable key.

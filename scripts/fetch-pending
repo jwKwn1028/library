@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+fetch_script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+fetch_library_root=$(cd -- "$fetch_script_dir/.." && pwd)
+
+exec python3 \
+  "$fetch_library_root/skills/paper-library-intake/scripts/fetch_pending.py" \
+  "$@" --root "$fetch_library_root"

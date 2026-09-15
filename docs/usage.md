@@ -13,8 +13,10 @@ agent-assisted document intake.
 - [Intake a library item](#intake-a-library-item)
 - [Add a metadata-only reading list](#add-a-metadata-only-reading-list)
 - [Attach a downloaded pending item](#attach-a-downloaded-pending-item)
+- [Fetch accessible pending PDFs](#fetch-accessible-pending-pdfs)
 - [Manifest reference](#manifest-reference)
 - [What an apply operation does](#what-an-apply-operation-does)
+- [Private intake reports](#private-intake-reports)
 - [Export to Zotero or EndNote](#export-to-zotero-or-endnote)
 - [Validate and build the catalog](#validate-and-build-the-catalog)
 - [Use the Typst examples](#use-the-typst-examples)
@@ -34,8 +36,8 @@ state.
 | --- | --- |
 | Empty catalog and bibliography seeds in `templates/` | Populated root `main.typ` and `library.bib` |
 | Synthetic demonstrations in `examples/` | The complete `Library/` media tree and retained sidecars |
-| Intake and validation scripts | Generated `PaperLibrary.pdf` and RIS exports |
-| Agent instructions and intake skill | Temporary intake manifests |
+| Intake and validation scripts | Generated `Catalog.pdf` and RIS exports |
+| Agent instructions and intake skill | Inbox files, manifests, and intake reports |
 | Privacy audit and export tooling | Local editor, agent, and credential files |
 
 The public templates preserve the catalog configuration and insertion points
@@ -47,24 +49,30 @@ them.
 The normal data flow is:
 
 ```text
-PDF/EPUB/MOBI file + reviewed metadata
+external PDF/EPUB/MOBI file
           |
           v
-   JSON intake manifest
+   stage-papers -> Inbox/
           |
           v
-       dry run
+document inspection + reviewed metadata
+          |
+          v
+one JSON manifest per topic
+          |
+          v
+multi-topic dry run
           |
           v
  transactional apply
-    |             |
-    v             v
-library.bib     main.typ
-    \             /
-     +-- validate --+
-             |
-             v
-      PaperLibrary.pdf
+    |          |           |
+    v          v           v
+library.bib  main.typ  private JSON report
+    \          /
+     +- validate/build -+
+              |
+              v
+         Catalog.pdf
 ```
 
 Judgment stays outside the transaction: a person or agent determines the
@@ -126,6 +134,12 @@ Git hooks:
 
 It also creates the ignored root `Library/` media directory when absent.
 
+The public catalog seed keeps `catalog-author` and `catalog-updated` empty.
+Set an author only in ignored root `main.typ`. Leave `catalog-updated` quoted;
+the first successful intake apply fills it with that operation's local date,
+which the catalog displays without a label. The public seed includes its
+right-aligned Spanish epigraph above the generated topic hierarchy.
+
 It is idempotent: if either destination exists, that file is retained without
 modification. This makes the command safe to rerun and prevents a template from
 overwriting a populated library.
@@ -171,6 +185,7 @@ paper-library/
 │   ├── install-hooks
 │   ├── intake-papers
 │   ├── public-repo
+│   ├── stage-papers
 │   ├── test
 │   └── validate-library.sh
 ├── skills/
@@ -182,9 +197,10 @@ paper-library/
 │   └── test_*.py
 ├── main.typ                  # private, created locally
 ├── library.bib               # private, created locally
-├── PaperLibrary.pdf          # private, generated locally
+├── Catalog.pdf               # private, generated locally
 ├── exports/                  # private reference-manager exports
 ├── Inbox/                    # private staging area
+├── reports/                  # private intake provenance
 └── Library/                  # private, wholly Git-ignored media root
     └── TopicalDirectory/     # conceptual subject taxonomy
         └── Subtopic/
@@ -199,19 +215,26 @@ separate private backup for the working library.
 
 ### 1. Stage only the items being processed
 
-Create the ignored inbox if necessary and place the incoming PDF, EPUB, or MOBI
-file and any citation export there:
+For files already inside the repository, place the incoming PDF, EPUB, or MOBI
+file and any citation export in the ignored `Inbox/`. For explicit paths
+elsewhere on the machine, use the staging command:
 
 ```sh
-mkdir -p Inbox
+./scripts/stage-papers /path/to/first.pdf /path/to/second.epub
+./scripts/stage-papers /path/to/first.pdf /path/to/second.epub --apply
 ```
 
-At apply time, do not leave unrelated, uncataloged PDF, EPUB, or MOBI files
-anywhere beneath the repository. The validator compares every supported
-non-example library file on disk with `library.bib`, so an unrelated item in
-`Inbox/` is correctly reported as an orphan. For several items going to the
-same topic, include all of them in one manifest. For items going to different
-topics, introduce and apply one topic batch at a time.
+The first command is a dry run. The second copies verified media into `Inbox/`
+without modifying the originals. Staging rejects symlinks, invalid media,
+destination collisions, and duplicate content already present in the batch,
+`Inbox/`, or `Library/`; it uses the same advisory lock as intake.
+
+`Inbox/` is intentionally excluded from canonical orphan validation, so
+unrelated staged documents may wait there while another batch is applied. They
+still participate in duplicate-content checks. Only files beneath `Library/`
+are canonical attachments. For several items going to one topic, include them
+in one manifest; for several topics, prepare one manifest per topic and submit
+all of them in the same intake command.
 
 ### 2. Recover and verify identity
 
@@ -319,7 +342,10 @@ Generate a starter outside the repository:
 
 The command refuses to overwrite an existing file. Edit the generated JSON
 after completing the review. One manifest represents exactly one destination
-topic but can contain multiple items for that topic.
+topic but can contain multiple items for that topic. Readable headings must
+identify their corresponding path components after spaces, punctuation, and
+case are ignored. For example, `Philosophy of Science` is the natural heading
+for `PhilosophyOfScience`; `Philosophy of Physics` is rejected during preflight.
 
 A synthetic manifest looks like this:
 
@@ -341,6 +367,10 @@ A synthetic manifest looks like this:
       "entry_type": "book",
       "title": "The official display title",
       "bib_title": "The official display title with {Protected Acronyms}",
+      "metadata_sources": [
+        "https://doi.org/10.0000/synthetic-item",
+        "https://api.crossref.org/works/10.0000%2Fsynthetic-item"
+      ],
       "fields": {
         "author": "Author, First and Researcher, Second",
         "publisher": "Publisher Name",
@@ -367,6 +397,15 @@ final gate because it also checks current private state and media contents.
 ./scripts/intake-papers --manifest /tmp/paper-intake.json
 ```
 
+For several destination topics, repeat `--manifest`. All manifests are checked
+against current library state and one another before any apply can begin:
+
+```sh
+./scripts/intake-papers \
+  --manifest /tmp/quantum-chemistry.json \
+  --manifest /tmp/peripheral-esoteric.json
+```
+
 Without `--apply`, no library file is changed. Review every printed value:
 
 - source and destination paths;
@@ -374,6 +413,7 @@ Without `--apply`, no library file is changed. Review every printed value:
 - citation key;
 - official display title;
 - DOI, when present;
+- metadata provenance URLs, when present;
 - sidecar disposition;
 - topic path and readable heading hierarchy;
 - the `Library/<topic.path>/` directory that apply will create if absent;
@@ -386,6 +426,15 @@ run; do not weaken a validation rule to force an uncertain record through.
 
 ```sh
 ./scripts/intake-papers --manifest /tmp/paper-intake.json --apply
+```
+
+The multi-topic form is also one transaction:
+
+```sh
+./scripts/intake-papers \
+  --manifest /tmp/quantum-chemistry.json \
+  --manifest /tmp/peripheral-esoteric.json \
+  --apply
 ```
 
 By default, listed sidecars remain in place as intake evidence. Remove them only
@@ -409,6 +458,17 @@ To use another root-level output filename:
 
 The custom output must be a filename ending in `.pdf`, not a path containing
 directories.
+
+To retain a private, machine-readable record, add a report to either the
+dry-run or apply command:
+
+```sh
+./scripts/intake-papers \
+  --manifest /tmp/paper-intake.json \
+  --report-json reports/paper-intake.json
+```
+
+An existing report is not replaced unless `--force-report` is explicit.
 
 ### 8. Review the result
 
@@ -457,6 +517,9 @@ A synthetic pending manifest omits all file properties:
       "citation_key": "example2026foundational",
       "entry_type": "article",
       "title": "A Synthetic Foundational Study",
+      "metadata_sources": [
+        "https://doi.org/10.0000/synthetic-foundational"
+      ],
       "fields": {
         "author": "Example, Ada and Researcher, Ben",
         "journaltitle": "Journal of Synthetic Examples",
@@ -475,7 +538,8 @@ Run the same dry-run and apply commands used for local documents. The plan
 prints `FILE PENDING DOWNLOAD`. A successful apply:
 
 - adds the verified record to `library.bib` with `file = {}`;
-- adds its title and citation key to `main.typ` without a link;
+- adds its title and citation key to `main.typ`, linking the title to the
+  References section;
 - adds no visible pending-status label to the catalog;
 - creates the empty `Library/<topic.path>/` destination directory but no
   placeholder media file; and
@@ -523,10 +587,46 @@ attachment manifest for the record's existing topic:
 
 Run the ordinary dry run, inspect the `ATTACH` source and destination, then
 apply it. The transaction moves the file, fills the existing empty BibTeX
-`file` field, replaces the existing unlinked catalog item with a link,
+`file` field, replaces the title's reference fallback with a direct media link,
 validates, and rebuilds the catalog. It does not create a second record or
 change metadata. An attachment is rejected if its key is absent, is no longer
 pending, appears ambiguously in the catalog, or belongs to another topic.
+
+## Fetch accessible pending PDFs
+
+The optional network helper discovers PDFs for existing DOI-backed pending
+records. Its default mode queries metadata but does not write files:
+
+```sh
+./scripts/fetch-pending --key example2026foundational
+./scripts/fetch-pending --key example2026foundational --apply
+```
+
+Repeat `--key` for a reviewed group. Use `--all` only when intentionally trying
+the complete pending set. `--apply` tests candidates in order and writes a
+successful result as `Inbox/<citation-key>.pdf`. It accepts only bounded,
+parseable PDFs whose first pages match the expected DOI or title/author;
+publisher landing pages, login HTML, mismatched works, and oversized responses
+are rejected.
+
+The default sources are anonymous OpenAlex open-access locations, Crossref
+full-text metadata, and the DOI resolver. Unpaywall requires an identifying
+email; enable it for the current process without writing it to a file:
+
+```sh
+PAPER_LIBRARY_FETCH_EMAIL="$CONTACT_EMAIL" \
+  ./scripts/fetch-pending --key example2026foundational --apply
+```
+
+The value is sent only to APIs that accept or require it and is not printed or
+stored. The helper does not use browser cookies, institutional credentials, or
+access-control workarounds. Subscription-only items normally remain pending
+and require a manual, authorized download.
+
+Fetching deliberately stops at `Inbox/`. Inspect each PDF and create the normal
+reviewed `attach: true` manifest with a canonical filename. The attachment
+transaction then moves the document, updates the empty `file` field and catalog
+link, validates the library, and rebuilds `Catalog.pdf`.
 
 ## Manifest reference
 
@@ -556,6 +656,7 @@ Item keys:
 | `entry_type` | no | Letters only; defaults to `article` |
 | `title` | yes | Plain Unicode display title for `main.typ` |
 | `bib_title` | no | BibTeX title with capitalization braces if needed |
+| `metadata_sources` | no | Unique HTTP(S) URLs used to verify metadata; retained only in reports |
 | `fields` | yes | Reviewed BibTeX fields |
 | `sidecars` | no | Array of `.bib` or `.bibtex` files inside the root |
 
@@ -572,6 +673,12 @@ An attachment item contains only `attach: true`, the existing `citation_key`,
 record's current topic. Do not repeat title or bibliographic fields: the
 transaction deliberately preserves them. Unknown properties at every manifest
 level are rejected. An optional top-level `$schema` annotation is accepted.
+
+`metadata_sources` may be used on a normal, pending, or attachment item. URLs
+must be non-empty HTTP(S) locations without embedded credentials. They are
+printed in the plan and copied into an optional private intake report, but are
+not written to `library.bib` or `main.typ`. Avoid signed URLs, private query
+parameters, or any provenance location that itself contains sensitive data.
 
 Field rules:
 
@@ -598,25 +705,31 @@ Manifests themselves may live outside it, which is why `/tmp` is recommended.
 
 ## What an apply operation does
 
-An apply is transactional:
+An apply is transactional across every repeated `--manifest` argument:
 
 1. an advisory `.paper-library.lock` is acquired so concurrent commands cannot
    overwrite one another;
-2. preflight validates the complete manifest and checks duplicates;
+2. preflight validates every manifest in command-line order and checks both
+   current-state and cross-manifest duplicates;
 3. current `library.bib`, `main.typ`, output catalog PDF, and optionally deleted
    sidecars are snapshotted;
-4. `Library/<topic.path>/` is created, even for pending-only manifests, and
-   local library files are moved when present;
+4. every requested `Library/<topic.path>/` is created, even for pending-only
+   manifests, and local library files are moved when present;
 5. new BibTeX records are rendered under a `% Topic:` section, or an attachment
    updates the parsed `file` value of its existing record;
-6. exact catalog headings are found or created before the bibliography block;
-7. linked local titles or unlinked pending titles and citation keys are
-   inserted without visible status labels;
-8. writes to the two text sources are atomic;
-9. `scripts/validate-library.sh` runs;
-10. Typst compiles a temporary catalog, which atomically replaces the requested
+6. catalog headings with the same normalized identity are found, or the
+   supplied naturally cased headings are created before the bibliography block;
+7. titles link directly to local media when present or to the References
+   section while pending, and citation keys are inserted without visible status
+   labels;
+8. the quoted private `catalog-updated` value is set to the current local date;
+9. writes to the two text sources are atomic;
+10. `scripts/validate-library.sh` runs;
+11. Typst compiles a temporary catalog, which atomically replaces the requested
    output only after success;
-11. explicitly selected sidecars are removed last.
+12. explicitly selected sidecars are removed;
+13. a requested applied JSON report is written with owner-only permissions
+    after validation and compilation have passed.
 
 If a move, write, validation, build, or cleanup step fails, the engine restores
 the snapshotted files, moves library files back, removes newly created empty
@@ -627,6 +740,30 @@ The lock also covers dry runs and pending-status reads. It waits five seconds
 by default; `--lock-timeout SECONDS` accepts a finite non-negative override.
 The script is designed for new intake and pending attachment, not bulk
 recategorization or mass-renaming of existing items.
+
+## Private intake reports
+
+`--report-json PATH` writes deterministic UTF-8 JSON for the reviewed run. A
+dry-run report has `status: "dry-run"` and leaves the library unchanged. An
+apply report has `status: "applied"` and records that validation and catalog
+compilation passed. It includes:
+
+- every manifest and topic;
+- action, citation key, title, normalized fields, and pending state;
+- source and destination paths, detected format, and SHA-256 hash;
+- `metadata_sources` and sidecar disposition; and
+- aggregate item counts, the requested catalog output, and the proposed or
+  applied last-updated date.
+
+Reports may be written outside the repository when their parent directory
+already exists. A report inside the repository must be beneath `reports/` or
+end in `.intake-report.json`, ensuring that the repository's ignore rules cover
+it. The command refuses symlink outputs, collisions with intake files, and
+existing reports unless `--force-report` is supplied. Symlinked parent
+directories are refused as well. Reports contain private
+bibliographic and filesystem data, are created with mode `0600`, must not be
+force-added, and are not a source of truth. During apply, report creation joins
+the same rollback boundary as document moves and catalog updates.
 
 ## Export to Zotero or EndNote
 
@@ -697,8 +834,8 @@ It checks:
   directories, and readable Typst heading hierarchies;
 - exactly one catalog item per key, matching BibTeX and catalog titles, and no
   duplicate citations or links hidden by set deduplication;
-- an exact link for every local record and no link or visible status label for
-  every pending record;
+- an exact media link for every local record and a References-section fallback,
+  without a visible status label, for every pending record;
 - canonical, safe, non-symlink paths rooted at `Library/` and an exact match
   between bibliography paths and all on-disk PDF/EPUB/MOBI files;
 - actual PDF, EPUB, and MOBI signatures/containers on every validation run;
@@ -712,19 +849,19 @@ the equivalent multiline form produced by Typst formatters.
 Compile manually when needed:
 
 ```sh
-typst compile main.typ PaperLibrary.pdf
+typst compile main.typ Catalog.pdf
 ```
 
 Watch for changes:
 
 ```sh
-typst watch main.typ PaperLibrary.pdf
+typst watch main.typ Catalog.pdf
 ```
 
 Use another supported citation style without editing the source:
 
 ```sh
-typst compile --input style=ieee main.typ PaperLibrary.pdf
+typst compile --input style=ieee main.typ Catalog.pdf
 ```
 
 The catalog uses New Computer Modern Sans as its primary face, followed by the
@@ -736,12 +873,24 @@ override the fallback without editing the source:
 ```sh
 typst compile \
   --input korean-font="Noto Sans CJK KR" \
-  main.typ PaperLibrary.pdf
+  main.typ Catalog.pdf
 ```
 
 The selected family must appear in `typst fonts`. Keep the output in the
 repository root so its relative links to local PDF, EPUB, and MOBI files resolve
 correctly.
+
+The optional byline is controlled by private root variables:
+
+```typst
+#let catalog-author = "Your display name"
+#let catalog-updated = ""
+```
+
+Do not add a personal author to `templates/main.typ`. The intake engine requires
+exactly one quoted `catalog-updated` declaration and updates it only during a
+successful `--apply`. A dry run calculates and prints the proposed date but
+does not modify `main.typ`; a failed apply restores its prior value.
 
 Manual edits to `main.typ` or `library.bib` are possible, but both must remain
 in lockstep. Run the validator immediately afterward. For routine additions,
@@ -812,8 +961,8 @@ the local library.
 
 `.gitignore` excludes the populated root catalog, every file beneath
 `Library/` regardless of type, all PDF/EPUB/MOBI files, all non-example BibTeX,
-RIS exports, inbox data, manifests, the advisory lock, caches, local tool
-configuration, and common secret files.
+RIS exports, inbox data, intake reports, manifests, the advisory lock, caches,
+local tool configuration, and common secret files.
 
 The stronger gate is:
 
@@ -837,14 +986,19 @@ non-example bibliographies, rejects symlinks, NUL-containing binary content,
 oversized public files, and credential-like paths, and scans text for home
 paths, email addresses, the current non-generic username, private keys, and
 common token formats. It also rejects a real BibTeX record, library-file link,
-or citation key copied into the public seed templates. Reachable commit author
-and committer emails must be provider no-reply addresses (the reserved
+or citation key copied into the public seed templates, plus any non-empty
+catalog author or last-updated value in `templates/main.typ`. Reachable commit
+author and committer emails must be provider no-reply addresses (the reserved
 `example.invalid` and `example.test` domains are accepted for synthetic tests),
 and the local username cannot be used as the Git display name.
 
 The audit reports finding categories and paths, not matched secret values. It
 fails closed: when adding an intentional public file, also add its exact
 relative path to `PUBLIC_FILES` in `scripts/public-repo`.
+
+In a standalone public export with no Git metadata, generated Python, Ruff,
+pytest, and mypy cache directories are excluded from the publishable surface so
+`scripts/test` can run there. Other unexpected files still fail the allowlist.
 
 The audit is a strong guardrail, not proof of anonymity. It cannot decide
 whether an otherwise ordinary display name or prose fact is identifying.
@@ -918,7 +1072,7 @@ To migrate to a fresh clone:
 4. run `scripts/install-hooks`;
 5. confirm the private files are ignored;
 6. run `scripts/validate-library.sh`; and
-7. rebuild `PaperLibrary.pdf`.
+7. rebuild `Catalog.pdf`.
 
 If no private catalog exists yet, use `scripts/init-library` instead of copying
 files.
@@ -930,11 +1084,17 @@ files.
 | `scripts/init-library` | Create missing private root sources and `Library/` | Creates missing files/directories only |
 | `scripts/install-hooks` | Select checked-in Git hooks for this clone | Changes local Git config only |
 | `scripts/export-bibliography` | Export private metadata to `exports/library.ris` | Writes derived RIS output only |
+| `scripts/fetch-pending --key KEY [--apply]` | Discover or stage an accessible pending PDF | Writes only ignored `Inbox/` with `--apply` |
 | `scripts/export-bibliography --output PATH --force` | Replace a selected RIS export | Replaces derived RIS output only |
+| `scripts/stage-papers PATH...` | Validate and print a plan to copy external media into `Inbox/` | No |
+| `scripts/stage-papers PATH... --apply` | Copy verified media into `Inbox/` while preserving originals | Adds private inbox copies |
 | `scripts/intake-papers --write-template PATH` | Write a starter JSON manifest | Writes only the requested new path |
 | `scripts/intake-papers status --pending [--json]` | List records awaiting documents | No |
 | `scripts/intake-papers --manifest PATH` | Validate and print an intake plan | No |
+| repeated `--manifest PATH` arguments | Preflight or apply several topics as one transaction | Follows dry-run or apply mode |
 | `scripts/intake-papers --manifest PATH --apply` | Apply, validate, and build transactionally | Yes |
+| `scripts/intake-papers --manifest PATH --report-json PATH` | Write a private dry-run provenance report | Writes only the report |
+| `scripts/intake-papers --manifest PATH --apply --report-json PATH` | Apply and write a private success report after validation/build | Yes |
 | attachment manifest with `--apply` | Connect a document to one pending record | Yes |
 | `scripts/intake-papers --manifest PATH --apply --delete-sidecars` | Apply and remove listed sidecars after success | Yes |
 | `scripts/intake-papers --manifest PATH --output NAME.pdf --apply` | Build a custom root-level catalog filename | Yes |
@@ -947,6 +1107,7 @@ Use built-in help for current command syntax:
 
 ```sh
 ./scripts/export-bibliography --help
+./scripts/stage-papers --help
 ./scripts/intake-papers --help
 ./scripts/intake-papers status --help
 ./scripts/public-repo --help
@@ -968,8 +1129,15 @@ apply transaction validates after inserting its record.
 ### `library files on disk and BibTeX file fields differ`
 
 Review the reported missing or uncataloged paths. A common cause is an unrelated
-PDF, EPUB, or MOBI file left in `Inbox/`, a manually moved file, a stale `file`
-field, or an item omitted from the manifest.
+PDF, EPUB, or MOBI file placed directly outside `Inbox/` and `Library/`, a
+manually moved canonical file, a stale `file` field, or an item omitted from the
+manifest. Staged files inside `Inbox/` are intentionally ignored by canonical
+orphan validation.
+
+### `refusing to overwrite existing report without --force-report`
+
+Choose a new private report path, or inspect the existing report and repeat the
+command with `--force-report` only when replacing it is intentional.
 
 ### Duplicate DOI, title, key, path, or content
 
@@ -1070,23 +1238,37 @@ Preserve these rules when extending the framework:
   contains no real topic headings, citations, or library-file links;
 - its `#bibliography(` anchor remains unindented so catalog insertion can find
   it;
+- its bibliography remains labeled `<references>` so pending titles have a
+  stable internal destination;
 - it retains the exact `#let bibliography-file = "library.bib"` declaration
   required by validation;
 - it retains New Computer Modern Sans as the primary face and an overridable
   `korean-font` fallback, with `NanumGothicCoding` as the originating system's
   default;
+- its `catalog-author` and `catalog-updated` defaults remain empty, while the
+  private root may supply an author and intake transactionally updates its date;
+- it displays a populated date without a label and retains the public Spanish
+  epigraph immediately above the generated topic hierarchy;
 - `templates/library.bib` contains comments only and no BibTeX record;
 - `examples/references.bib` remains synthetic and has no local `file` or
   taxonomy `keywords` fields;
 - the intake engine remains offline and manifest-driven;
 - the shared `paperlib/` parser and media checks remain the single
   interpretation used by intake, export, and validation;
-- pending attachment changes only an existing empty `file` field and its
-  catalog link while the advisory lock is held;
+- pending attachment changes only an existing empty `file` field and replaces
+  its reference fallback with a direct catalog media link while the advisory
+  lock is held;
+- staging copies explicit external media into ignored `Inbox/`, preserves the
+  originals, and shares the advisory lock;
+- repeated topic manifests are preflighted and applied as one transaction;
+- heading labels and path components retain the same normalized identity;
+- metadata provenance stays in optional private reports and never becomes
+  canonical bibliography or catalog data;
 - `schemas/intake-manifest.schema.json` tracks the preferred manifest form;
 - the RIS exporter remains offline, read-only with respect to canonical state,
   and excludes local `file` values;
-- root private files and the entire `Library/` tree remain ignored;
+- root private files, `Inbox/`, `reports/`, and the entire `Library/` tree
+  remain ignored;
 - new public files are added deliberately to the privacy allowlist;
 - changes to manifest behavior update the intake contract and this guide; and
 - changes to privacy behavior update this guide, `AGENTS.md`, and `CLAUDE.md`.

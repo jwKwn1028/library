@@ -41,20 +41,26 @@ PUBLIC_FILES = {
     Path("scripts/init-library"),
     Path("scripts/install-hooks"),
     Path("scripts/export-bibliography"),
+    Path("scripts/fetch-pending"),
     Path("scripts/intake-papers"),
     Path("scripts/public-repo"),
+    Path("scripts/stage-papers"),
     Path("scripts/test"),
     Path("scripts/validate-library.sh"),
     Path("skills/paper-library-intake/SKILL.md"),
     Path("skills/paper-library-intake/agents/openai.yaml"),
     Path("skills/paper-library-intake/references/intake-contract.md"),
+    Path("skills/paper-library-intake/scripts/fetch_pending.py"),
     Path("skills/paper-library-intake/scripts/intake_papers.py"),
+    Path("skills/paper-library-intake/scripts/stage_papers.py"),
     Path("templates/library.bib"),
     Path("templates/main.typ"),
     Path("tests/__init__.py"),
     Path("tests/test_export_bibliography.py"),
+    Path("tests/test_fetch_pending.py"),
     Path("tests/test_intake_formats.py"),
     Path("tests/test_public_repo.py"),
+    Path("tests/test_stage_papers.py"),
     Path("tests/test_validation.py"),
 }
 PUBLIC_BIBLIOGRAPHIES = {
@@ -64,7 +70,7 @@ PUBLIC_BIBLIOGRAPHIES = {
 PRIVATE_ROOT_FILES = {
     Path("main.typ"),
     Path("library.bib"),
-    Path("PaperLibrary.pdf"),
+    Path("Catalog.pdf"),
 }
 BLOCKED_NAMES = {
     ".env",
@@ -86,12 +92,22 @@ BLOCKED_SUFFIXES = {
 MAX_PUBLIC_FILE_BYTES = 2 * 1024 * 1024
 GENERIC_USERNAMES = {"admin", "nobody", "root", "runner", "ubuntu", "user"}
 LIBRARY_MEDIA_SUFFIXES = {".epub", ".mobi", ".pdf"}
+GENERATED_CACHE_DIRECTORIES = {
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "__pycache__",
+}
+GENERATED_PYTHON_SUFFIXES = {".pyc", ".pyd", ".pyo"}
 BIBTEX_ENTRY_RE = re.compile(rb"(?m)^[ \t]*@[A-Za-z]+\{")
 BIBTEX_LIBRARY_FIELD_RE = re.compile(rb"(?im)^[ \t]*(?:file|keywords)[ \t]*=")
 CATALOG_LIBRARY_LINK_RE = re.compile(
     rb'#link\(\s*"[^"]+\.(?:epub|mobi|pdf)"\s*,?\s*\)', flags=re.IGNORECASE
 )
 CATALOG_CITATION_RE = re.compile(rb"(?m)@[a-z]+[0-9]{4}[a-z0-9]+")
+CATALOG_PRIVATE_CONFIG_RE = re.compile(
+    rb'(?m)^#let catalog-(?:author|updated) = "(?!")[^"\r\n]+"\s*$'
+)
 
 
 class PublicRepoError(RuntimeError):
@@ -173,6 +189,10 @@ def exported_files(root: Path) -> list[Path]:
         relative = candidate.relative_to(root)
         if ".git" in relative.parts:
             continue
+        if any(part in GENERATED_CACHE_DIRECTORIES for part in relative.parts):
+            continue
+        if candidate.suffix.casefold() in GENERATED_PYTHON_SUFFIXES:
+            continue
         if candidate.is_symlink() or candidate.is_file():
             files.append(relative)
     return sorted(files)
@@ -200,13 +220,15 @@ def check_ignore_policy(root: Path, errors: list[str]) -> None:
     private_examples = (
         Path("main.typ"),
         Path("library.bib"),
-        Path("PaperLibrary.pdf"),
+        Path("Catalog.pdf"),
         Path("Library/PrivateTopic/ExamplePaper.pdf"),
         Path("Library/PrivateTopic/ExampleBook.epub"),
         Path("Library/PrivateTopic/ExampleBook.mobi"),
         Path("Library/PrivateTopic/metadata.json"),
         Path("exports/library.ris"),
         Path("Inbox/downloaded-citation.bibtex"),
+        Path("reports/private.intake-report.json"),
+        Path("private.intake-report.json"),
         Path(".paper-library.lock"),
     )
     for relative in private_examples:
@@ -309,6 +331,10 @@ def check_public_data(
         errors.append(f"catalog template contains a library-file link: {label}")
     if relative == Path("templates/main.typ") and CATALOG_CITATION_RE.search(data):
         errors.append(f"catalog template contains a real citation: {label}")
+    if relative == Path("templates/main.typ") and CATALOG_PRIVATE_CONFIG_RE.search(
+        data
+    ):
+        errors.append(f"catalog template contains a non-empty private byline: {label}")
     for finding, pattern in patterns:
         if pattern.search(data):
             errors.append(f"possible {finding}: {label}")

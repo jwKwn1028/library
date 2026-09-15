@@ -29,6 +29,7 @@ TOPIC_RE = re.compile(r"^[A-Z][A-Za-z0-9]*$")
 NAME_RE = re.compile(r"^[A-Z][A-Za-z0-9]*\.(?:epub|mobi|pdf)$")
 EXCLUDED_MEDIA_ROOTS = {
     ".github",
+    "Inbox",
     "docs",
     "examples",
     "paperlib",
@@ -125,6 +126,11 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
     )
     if len(bibliography_bindings) != 1:
         errors.append("main.typ must select library.bib exactly once")
+    bibliography_targets = re.findall(
+        r"(?ms)^#bibliography\s*\(.*?^\)\s*<references>\s*$", main_text
+    )
+    if len(bibliography_targets) != 1:
+        errors.append("main.typ must label its bibliography <references> exactly once")
 
     keys = [entry.citation_key for entry in entries]
     for key in keys:
@@ -282,14 +288,24 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
             for part in entry.fields.get("keywords", "").split(",")
             if part.strip()
         )
-        heading_path = tuple(heading_component(heading) for heading in item.headings)
-        if heading_path != keywords:
+        heading_path = tuple(
+            heading_component(heading).casefold() for heading in item.headings
+        )
+        if heading_path != tuple(keyword.casefold() for keyword in keywords):
             errors.append(f"catalog headings and BibTeX keywords differ for {key}")
         file_value = entry.fields.get("file", "").strip()
         if file_value and item.path != file_value:
             errors.append(f"catalog link and BibTeX file differ for {key}")
+        if file_value and item.reference_fallback:
+            errors.append(
+                f"local entry {key} must link its title only to its library file"
+            )
         if not file_value and item.path is not None:
-            errors.append(f"pending entry {key} must not have a catalog link")
+            errors.append(f"pending entry {key} must not link to a local file")
+        if not file_value and not item.reference_fallback:
+            errors.append(
+                f"pending entry {key} must link its title to the references section"
+            )
 
     disk_paths, disk_errors = _disk_media(root)
     errors.extend(disk_errors)
@@ -324,7 +340,7 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
             with tempfile.TemporaryDirectory(
                 prefix="paper-library-validation-"
             ) as temporary_directory:
-                output = Path(temporary_directory) / "PaperLibrary.pdf"
+                output = Path(temporary_directory) / "Catalog.pdf"
                 compilation = subprocess.run(
                     [typst, "compile", str(main_path), str(output)],
                     cwd=root,

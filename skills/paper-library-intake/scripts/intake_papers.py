@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from datetime import date
 import fcntl
 import json
 import math
@@ -19,6 +20,7 @@ import sys
 import tempfile
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(REPOSITORY_ROOT) not in sys.path:
@@ -35,7 +37,12 @@ from paperlib.bibtex import (  # noqa: E402
     replace_field_values,
     title_identity,
 )
-from paperlib.catalog import CatalogError, CatalogItem, parse_catalog  # noqa: E402
+from paperlib.catalog import (  # noqa: E402
+    CatalogError,
+    CatalogItem,
+    heading_component,
+    parse_catalog,
+)
 from paperlib.media import (  # noqa: E402
     MediaError,
     SUPPORTED_EXTENSIONS,
@@ -52,6 +59,9 @@ ENTRY_TYPE_RE = re.compile(r"^[A-Za-z]+$")
 FIELD_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 HEADING_RE = re.compile(r"^(=+)\s+(.+?)\s*$")
 SAFE_HEADING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 &+()/.\-–]*$")
+CATALOG_UPDATED_RE = re.compile(
+    r'^#let catalog-updated = "(?:\\.|[^"\\])*"\s*$', re.MULTILINE
+)
 
 
 class IntakeError(RuntimeError):
@@ -67,6 +77,7 @@ class ItemPlan:
     display_title: str
     fields: dict[str, str]
     sidecars: tuple[Path, ...]
+    metadata_sources: tuple[str, ...]
     digest: str | None
     existing_entry: BibEntry | None = None
     existing_catalog_item: CatalogItem | None = None
@@ -87,6 +98,15 @@ class Snapshot:
     mode: int | None
 
 
+@dataclass(frozen=True)
+class TopicPlan:
+    manifest_path: Path
+    topic_path: str
+    headings: tuple[str, ...]
+    topic_directory: Path
+    items: tuple[ItemPlan, ...]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -95,7 +115,12 @@ def parse_args() -> argparse.Namespace:
         )
     )
     source_group = parser.add_mutually_exclusive_group(required=True)
-    source_group.add_argument("--manifest", type=Path, help="reviewed JSON manifest")
+    source_group.add_argument(
+        "--manifest",
+        type=Path,
+        action="append",
+        help="reviewed JSON manifest; repeat for one transactional multi-topic batch",
+    )
     source_group.add_argument(
         "--write-template", type=Path, metavar="PATH", help="write a starter manifest"
     )
@@ -108,8 +133,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        default="PaperLibrary.pdf",
-        help="root-level catalog PDF name (default: PaperLibrary.pdf)",
+        default="Catalog.pdf",
+        help="root-level catalog PDF name (default: Catalog.pdf)",
     )
     parser.add_argument(
         "--lock-timeout",
@@ -117,6 +142,17 @@ def parse_args() -> argparse.Namespace:
         default=5.0,
         metavar="SECONDS",
         help="seconds to wait for the library lock (default: 5)",
+    )
+    parser.add_argument(
+        "--report-json",
+        type=Path,
+        metavar="PATH",
+        help="write a private machine-readable intake report",
+    )
+    parser.add_argument(
+        "--force-report",
+        action="store_true",
+        help="replace an existing --report-json output",
     )
     return parser.parse_args()
 
@@ -206,6 +242,10 @@ def template_manifest() -> dict[str, Any]:
                     "pages": "101--120",
                     "doi": "10.0000/example-doi",
                 },
+                "metadata_sources": [
+                    "https://doi.org/10.0000/example-doi",
+                    "https://api.crossref.org/works/10.0000%2Fexample-doi",
+                ],
                 "sidecars": ["Inbox/downloaded-citation.bib"],
             }
         ],
@@ -231,13 +271,27 @@ def require_text(mapping: dict[str, Any], key: str, context: str) -> str:
     return value.strip()
 
 
+def first_symlink_component(path: Path) -> Path | None:
+    if not path.is_absolute():
+        raise ValueError("symlink-component checks require an absolute path")
+    cursor = Path(path.anchor)
+    for component in path.parts[1:]:
+        cursor /= component
+        if cursor.is_symlink():
+            return cursor
+    return None
+
+
 def resolve_in_root(root: Path, value: str, context: str) -> Path:
     raw_path = Path(value).expanduser()
     candidate = raw_path if raw_path.is_absolute() else root / raw_path
-    resolved = candidate.resolve()
-    if not resolved.is_relative_to(root):
+    absolute = Path(os.path.abspath(candidate))
+    if not absolute.is_relative_to(root):
         raise IntakeError(f"{context} leaves the library root: {value}")
-    return resolved
+    symlink = first_symlink_component(absolute)
+    if symlink is not None:
+        raise IntakeError(f"{context} uses a symlinked path component: {symlink}")
+    return absolute.resolve()
 
 
 def normalize_space(value: Any, context: str) -> str:
@@ -247,6 +301,22 @@ def normalize_space(value: Any, context: str) -> str:
     if not normalized:
         raise IntakeError(f"{context} cannot be empty")
     return normalized
+
+
+def current_catalog_date(today: date | None = None) -> str:
+    value = today or date.today()
+    return f"{value.strftime('%B')} {value.day}, {value.year}"
+
+
+def update_catalog_date(main_text: str, value: str) -> str:
+    matches = list(CATALOG_UPDATED_RE.finditer(main_text))
+    if len(matches) != 1:
+        raise IntakeError(
+            "main.typ must define exactly one quoted #let catalog-updated value"
+        )
+    match = matches[0]
+    replacement = f"#let catalog-updated = {json.dumps(value)}"
+    return main_text[: match.start()] + replacement + main_text[match.end() :]
 
 
 def braces_are_balanced(value: str) -> bool:
@@ -358,7 +428,13 @@ def parse_topic(manifest: dict[str, Any]) -> tuple[str, tuple[str, ...], list[st
             heading.strip()
         ):
             raise IntakeError(f"topic.headings[{index}] is not safe plain heading text")
-        headings.append(heading.strip())
+        clean_heading = heading.strip()
+        if heading_component(clean_heading).casefold() != topic_parts[index].casefold():
+            raise IntakeError(
+                f"topic.headings[{index}] must match topic.path component "
+                f"{topic_parts[index]} when spacing, punctuation, and case are ignored"
+            )
+        headings.append(clean_heading)
     return topic_path, topic_parts, headings
 
 
@@ -393,6 +469,34 @@ def parse_sidecars(
             )
         sidecars.append(sidecar)
     return tuple(sidecars)
+
+
+def parse_metadata_sources(raw_item: dict[str, Any], context: str) -> tuple[str, ...]:
+    raw_sources = raw_item.get("metadata_sources", [])
+    if not isinstance(raw_sources, list):
+        raise IntakeError(f"{context}.metadata_sources must be an array")
+    sources: list[str] = []
+    seen: set[str] = set()
+    for index, value in enumerate(raw_sources):
+        source_context = f"{context}.metadata_sources[{index}]"
+        if not isinstance(value, str) or not value.strip():
+            raise IntakeError(f"{source_context} must be a non-empty URL")
+        source = value.strip()
+        parsed = urlsplit(source)
+        if (
+            parsed.scheme.casefold() not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or any(character.isspace() for character in source)
+        ):
+            raise IntakeError(f"{source_context} must be an HTTP(S) URL")
+        identity = source.casefold()
+        if identity in seen:
+            raise IntakeError(f"duplicate metadata source URL: {source}")
+        seen.add(identity)
+        sources.append(source)
+    return tuple(sources)
 
 
 def resolve_document(
@@ -565,6 +669,7 @@ def build_new_plan(
         "bib_title",
         "fields",
         "sidecars",
+        "metadata_sources",
     }
     unknown = set(raw_item) - allowed
     if unknown:
@@ -648,6 +753,7 @@ def build_new_plan(
         display_title=display_title,
         fields=fields,
         sidecars=parse_sidecars(raw_item, context, state.root),
+        metadata_sources=parse_metadata_sources(raw_item, context),
         digest=digest,
     )
 
@@ -661,6 +767,7 @@ def build_attachment_plan(
         "source_file",
         "canonical_filename",
         "sidecars",
+        "metadata_sources",
     }
     unknown = set(raw_item) - allowed
     if unknown:
@@ -722,6 +829,7 @@ def build_attachment_plan(
         display_title=plain_text(fields.get("title", "")),
         fields=fields,
         sidecars=parse_sidecars(raw_item, context, state.root),
+        metadata_sources=parse_metadata_sources(raw_item, context),
         digest=digest,
         existing_entry=entry,
         existing_catalog_item=catalog_item,
@@ -893,7 +1001,11 @@ def find_section_end(lines: list[str], start: int, level: int, limit: int) -> in
 def catalog_item(plan: ItemPlan, root: Path) -> list[str]:
     title_literal = json.dumps(plan.display_title, ensure_ascii=False)
     if plan.pending:
-        return [f"- #text({title_literal}) @{plan.citation_key}"]
+        return [
+            "- #link(<references>)[",
+            f"    #text({title_literal})",
+            f"  ] @{plan.citation_key}",
+        ]
 
     assert plan.target_file is not None
     relative_path = plan.target_file.relative_to(root).as_posix()
@@ -928,12 +1040,17 @@ def insert_catalog_items(
     missing_level: int | None = None
 
     for level, heading in enumerate(headings, start=1):
-        expected = f"{'=' * level} {heading}"
+        expected_component = heading_component(heading).casefold()
         match_index = next(
             (
                 index
                 for index in range(search_start, search_end)
-                if lines[index].strip() == expected
+                if (
+                    (match := HEADING_RE.fullmatch(lines[index].strip())) is not None
+                    and len(match.group(1)) == level
+                    and heading_component(match.group(2)).casefold()
+                    == expected_component
+                )
             ),
             None,
         )
@@ -1025,61 +1142,272 @@ def ensure_directory(path: Path, root: Path) -> list[Path]:
     return missing
 
 
+def display_path(path: Path, root: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def batch_items(topic_plans: list[TopicPlan]) -> list[ItemPlan]:
+    return [item for topic in topic_plans for item in topic.items]
+
+
+def preflight_batch_files(root: Path, topic_plans: list[TopicPlan]) -> None:
+    sources: dict[Path, Path] = {}
+    targets: dict[Path, Path] = {}
+    hashes: dict[str, Path] = {}
+    for plan in batch_items(topic_plans):
+        if plan.source_file is None or plan.target_file is None or plan.digest is None:
+            continue
+        prior_source = sources.get(plan.source_file)
+        if prior_source is not None:
+            raise IntakeError(
+                "source file appears in more than one manifest: "
+                f"{plan.source_file.relative_to(root)}"
+            )
+        prior_target = targets.get(plan.target_file)
+        if prior_target is not None:
+            raise IntakeError(
+                "multiple manifests target the same path: "
+                f"{plan.target_file.relative_to(root)}"
+            )
+        prior_hash = hashes.get(plan.digest)
+        if prior_hash is not None:
+            raise IntakeError(
+                "duplicate file content across manifests: "
+                f"{prior_hash.relative_to(root)} and "
+                f"{plan.source_file.relative_to(root)}"
+            )
+        sources[plan.source_file] = plan.source_file
+        targets[plan.target_file] = plan.source_file
+        hashes[plan.digest] = plan.source_file
+
+
+def resolve_report_path(
+    requested: Path | None,
+    *,
+    root: Path,
+    force: bool,
+    protected_paths: set[Path],
+) -> Path | None:
+    if requested is None:
+        if force:
+            raise IntakeError("--force-report requires --report-json")
+        return None
+    raw_path = requested.expanduser()
+    candidate = raw_path if raw_path.is_absolute() else Path.cwd() / raw_path
+    absolute = Path(os.path.abspath(candidate))
+    symlink = first_symlink_component(absolute)
+    if symlink is not None:
+        raise IntakeError(
+            f"report output must not use a symlinked path component: {symlink}"
+        )
+    report_path = absolute.resolve()
+    if report_path.suffix.casefold() != ".json":
+        raise IntakeError("--report-json output must end in .json")
+    if report_path in protected_paths:
+        raise IntakeError(f"report output conflicts with an intake path: {report_path}")
+    if report_path.exists():
+        if not report_path.is_file():
+            raise IntakeError(f"report output is not a regular file: {report_path}")
+        if not force:
+            raise IntakeError(
+                f"refusing to overwrite existing report without --force-report: "
+                f"{report_path}"
+            )
+    try:
+        relative = report_path.relative_to(root)
+    except ValueError:
+        if not report_path.parent.is_dir():
+            raise IntakeError(
+                "an external report output requires an existing parent directory: "
+                f"{report_path.parent}"
+            )
+    else:
+        if not relative.parts or (
+            relative.parts[0] != "reports"
+            and not report_path.name.endswith(".intake-report.json")
+        ):
+            raise IntakeError(
+                "a report inside the repository must be beneath reports/ or end in "
+                ".intake-report.json so Git ignore rules protect it"
+            )
+    return report_path
+
+
+def intake_report(
+    root: Path,
+    topic_plans: list[TopicPlan],
+    *,
+    status: str,
+    delete_sidecars: bool,
+    output_name: str,
+    catalog_updated: str,
+) -> dict[str, Any]:
+    topics = []
+    for topic in topic_plans:
+        items = []
+        for plan in topic.items:
+            source_file = (
+                display_path(plan.source_file, root)
+                if plan.source_file is not None
+                else None
+            )
+            target_file = (
+                display_path(plan.target_file, root)
+                if plan.target_file is not None
+                else None
+            )
+            items.append(
+                {
+                    "action": "attach" if plan.attachment else "add",
+                    "citation_key": plan.citation_key,
+                    "entry_type": plan.entry_type,
+                    "title": plan.display_title,
+                    "pending": plan.pending,
+                    "source_file": source_file,
+                    "destination_file": target_file,
+                    "format": (
+                        plan.source_file.suffix.removeprefix(".").upper()
+                        if plan.source_file is not None
+                        else None
+                    ),
+                    "sha256": plan.digest,
+                    "fields": dict(plan.fields),
+                    "metadata_sources": list(plan.metadata_sources),
+                    "sidecars": [
+                        {
+                            "path": display_path(sidecar, root),
+                            "disposition": (
+                                "delete-after-success" if delete_sidecars else "retain"
+                            ),
+                        }
+                        for sidecar in plan.sidecars
+                    ],
+                }
+            )
+        topics.append(
+            {
+                "manifest": display_path(topic.manifest_path, root),
+                "topic": {
+                    "path": topic.topic_path,
+                    "headings": list(topic.headings),
+                },
+                "destination_directory": display_path(topic.topic_directory, root),
+                "items": items,
+            }
+        )
+
+    items = batch_items(topic_plans)
+    applied = status == "applied"
+    return {
+        "report_version": 1,
+        "contains_private_library_metadata": True,
+        "status": status,
+        "topics": topics,
+        "summary": {
+            "manifests": len(topic_plans),
+            "topics": len({topic.topic_path for topic in topic_plans}),
+            "items": len(items),
+            "new_records": sum(not item.attachment for item in items),
+            "attachments": sum(item.attachment for item in items),
+            "pending_records": sum(item.pending for item in items),
+            "local_documents": sum(not item.pending for item in items),
+        },
+        "sidecar_policy": "delete-after-success" if delete_sidecars else "retain",
+        "validation": "passed" if applied else "not-run",
+        "catalog_build": "passed" if applied else "not-run",
+        "catalog_output": output_name,
+        "catalog_updated": catalog_updated,
+    }
+
+
+def report_bytes(payload: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+
+
+def write_report(root: Path, path: Path, payload: dict[str, Any]) -> None:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        pass
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(path, report_bytes(payload), 0o600)
+
+
 def print_plan(
     root: Path,
-    topic_path: str,
-    topic_directory: Path,
-    headings: list[str],
-    plans: list[ItemPlan],
+    topic_plans: list[TopicPlan],
     delete: bool,
     output_name: str,
     apply: bool,
+    report_path: Path | None,
+    catalog_updated: str,
 ) -> None:
     if apply:
         print("APPLY PLAN — changes begin after this summary")
-    else:
+    elif report_path is None:
         print("DRY RUN — no files changed")
-    print(f"Topic: {topic_path}")
-    print(f"Headings: {' > '.join(headings)}")
-    print(f"DIR   {topic_directory.relative_to(root)} (create if missing)")
-    for plan in plans:
-        print()
-        if plan.pending:
-            print("FILE  PENDING DOWNLOAD (empty BibTeX file field)")
-        else:
-            assert plan.source_file is not None
-            assert plan.target_file is not None
-            action = "ATTACH" if plan.attachment else "MOVE  "
-            print(f"{action} {plan.source_file.relative_to(root)}")
-            print(f"   -> {plan.target_file.relative_to(root)}")
-        print(f"KEY   {plan.citation_key}")
-        if plan.source_file is not None:
-            print(f"FORMAT {plan.source_file.suffix.removeprefix('.').upper()}")
-        print(f"TITLE {plan.display_title}")
-        if "doi" in plan.fields:
-            print(f"DOI   {plan.fields['doi']}")
-        for sidecar in plan.sidecars:
-            action = "DELETE AFTER SUCCESS" if delete else "KEEP"
-            print(f"{action} {sidecar.relative_to(root)}")
+    else:
+        print("DRY RUN — library state unchanged; report will be written")
+    if len(topic_plans) > 1:
+        print(f"BATCH {len(topic_plans)} manifest(s)")
+    for topic_index, topic in enumerate(topic_plans):
+        if topic_index or len(topic_plans) > 1:
+            print()
+        print(f"Manifest: {display_path(topic.manifest_path, root)}")
+        print(f"Topic: {topic.topic_path}")
+        print(f"Headings: {' > '.join(topic.headings)}")
+        print(f"DIR   {topic.topic_directory.relative_to(root)} (create if missing)")
+        for plan in topic.items:
+            print()
+            if plan.pending:
+                print("FILE  PENDING DOWNLOAD (empty BibTeX file field)")
+            else:
+                assert plan.source_file is not None
+                assert plan.target_file is not None
+                action = "ATTACH" if plan.attachment else "MOVE  "
+                print(f"{action} {plan.source_file.relative_to(root)}")
+                print(f"   -> {plan.target_file.relative_to(root)}")
+            print(f"KEY   {plan.citation_key}")
+            if plan.source_file is not None:
+                print(f"FORMAT {plan.source_file.suffix.removeprefix('.').upper()}")
+            print(f"TITLE {plan.display_title}")
+            if "doi" in plan.fields:
+                print(f"DOI   {plan.fields['doi']}")
+            for metadata_source in plan.metadata_sources:
+                print(f"META  {metadata_source}")
+            for sidecar in plan.sidecars:
+                action = "DELETE AFTER SUCCESS" if delete else "KEEP"
+                print(f"{action} {sidecar.relative_to(root)}")
     print()
-    new_count = sum(not plan.attachment for plan in plans)
-    attachment_count = sum(plan.attachment for plan in plans)
+    items = batch_items(topic_plans)
+    new_count = sum(not plan.attachment for plan in items)
+    attachment_count = sum(plan.attachment for plan in items)
     if new_count:
         print(f"ADD {new_count} record(s) to library.bib and main.typ")
     if attachment_count:
         print(f"UPDATE {attachment_count} pending record(s) and catalog link(s)")
     print("RUN scripts/validate-library.sh")
     print(f"BUILD {output_name}")
+    print(f"DATE  Last updated: {catalog_updated}")
+    if report_path is not None:
+        print(f"REPORT {display_path(report_path, root)}")
 
 
 def apply_plan(
     root: Path,
-    topic_directory: Path,
-    plans: list[ItemPlan],
+    topic_plans: list[TopicPlan],
     new_bib: str,
     new_main: str,
     output_path: Path,
     delete_sidecars: bool,
+    report_path: Path | None,
+    report_data: bytes | None,
 ) -> None:
     bib_path = root / "library.bib"
     main_path = root / "main.typ"
@@ -1090,6 +1418,7 @@ def apply_plan(
     if not typst:
         raise IntakeError("typst is required for transactional validation and build")
 
+    plans = batch_items(topic_plans)
     unique_sidecars = sorted(
         {sidecar for plan in plans for sidecar in plan.sidecars},
         key=lambda path: str(path),
@@ -1108,6 +1437,8 @@ def apply_plan(
         main_path: snapshot(main_path),
         output_path: snapshot(output_path),
     }
+    if report_path is not None:
+        saved[report_path] = snapshot(report_path)
     if delete_sidecars:
         saved.update({sidecar: snapshot(sidecar) for sidecar in unique_sidecars})
 
@@ -1117,7 +1448,8 @@ def apply_plan(
     temporary_output.unlink(missing_ok=True)
 
     try:
-        created_directories.update(ensure_directory(topic_directory, root))
+        for topic in topic_plans:
+            created_directories.update(ensure_directory(topic.topic_directory, root))
         for plan in plans:
             if plan.pending:
                 continue
@@ -1153,6 +1485,16 @@ def apply_plan(
         if delete_sidecars:
             for sidecar in unique_sidecars:
                 sidecar.unlink()
+
+        if report_path is not None:
+            assert report_data is not None
+            try:
+                report_path.relative_to(root)
+            except ValueError:
+                pass
+            else:
+                created_directories.update(ensure_directory(report_path.parent, root))
+            atomic_write(report_path, report_data, 0o600)
 
     except Exception as error:
         for path, saved_path in saved.items():
@@ -1238,6 +1580,10 @@ def run_status(arguments: list[str]) -> int:
 
 def run_manifest(args: argparse.Namespace) -> int:
     if args.write_template is not None:
+        if args.apply or args.delete_sidecars or args.report_json or args.force_report:
+            raise IntakeError(
+                "--write-template cannot be combined with apply, sidecar, or report options"
+            )
         write_template(args.write_template)
         return 0
 
@@ -1254,56 +1600,131 @@ def run_manifest(args: argparse.Namespace) -> int:
         if not bib_path.is_file() or not main_path.is_file():
             raise IntakeError("the library root must contain library.bib and main.typ")
 
-        manifest_path = args.manifest.expanduser().resolve()
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise IntakeError(
-                f"cannot read manifest {manifest_path}: {error}"
-            ) from error
-        if not isinstance(manifest, dict):
-            raise IntakeError("manifest root must be a JSON object")
-
         bib_text = bib_path.read_text(encoding="utf-8")
         main_text = main_path.read_text(encoding="utf-8")
-        topic_path, headings, plans = parse_manifest(
-            root, manifest, bib_text, main_text, output_path
+        manifest_paths = [path.expanduser().resolve() for path in args.manifest]
+        if len(set(manifest_paths)) != len(manifest_paths):
+            raise IntakeError("the same manifest was supplied more than once")
+
+        topic_plans: list[TopicPlan] = []
+        new_bib = bib_text
+        new_main = main_text
+        for manifest_path in manifest_paths:
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise IntakeError(
+                    f"cannot read manifest {manifest_path}: {error}"
+                ) from error
+            if not isinstance(manifest, dict):
+                raise IntakeError(
+                    f"manifest root must be a JSON object: {manifest_path}"
+                )
+
+            try:
+                topic_path, headings, plans = parse_manifest(
+                    root, manifest, new_bib, new_main, output_path
+                )
+            except IntakeError as error:
+                raise IntakeError(
+                    f"{display_path(manifest_path, root)}: {error}"
+                ) from error
+            topic_directory = resolve_in_root(
+                root,
+                f"{LIBRARY_DIRECTORY}/{topic_path}",
+                "topic.path",
+            )
+            topic_plans.append(
+                TopicPlan(
+                    manifest_path=manifest_path,
+                    topic_path=topic_path,
+                    headings=tuple(headings),
+                    topic_directory=topic_directory,
+                    items=tuple(plans),
+                )
+            )
+            new_bib = update_bibtex(new_bib, topic_path, plans)
+            new_main = update_catalog(new_main, headings, plans, root)
+
+        catalog_updated = current_catalog_date()
+        new_main = update_catalog_date(new_main, catalog_updated)
+        preflight_batch_files(root, topic_plans)
+        plans = batch_items(topic_plans)
+        protected_paths = {
+            bib_path,
+            main_path,
+            output_path,
+            *manifest_paths,
+            *(plan.source_file for plan in plans if plan.source_file is not None),
+            *(plan.target_file for plan in plans if plan.target_file is not None),
+            *(sidecar for plan in plans for sidecar in plan.sidecars),
+        }
+        report_path = resolve_report_path(
+            args.report_json,
+            root=root,
+            force=args.force_report,
+            protected_paths=protected_paths,
         )
-        topic_directory = resolve_in_root(
-            root,
-            f"{LIBRARY_DIRECTORY}/{topic_path}",
-            "topic.path",
-        )
-        new_bib = update_bibtex(bib_text, topic_path, plans)
-        new_main = update_catalog(main_text, headings, plans, root)
 
         print_plan(
             root,
-            topic_path,
-            topic_directory,
-            headings,
-            plans,
+            topic_plans,
             args.delete_sidecars,
             args.output,
             args.apply,
+            report_path,
+            catalog_updated,
         )
         if not args.apply:
+            if report_path is not None:
+                write_report(
+                    root,
+                    report_path,
+                    intake_report(
+                        root,
+                        topic_plans,
+                        status="dry-run",
+                        delete_sidecars=args.delete_sidecars,
+                        output_name=args.output,
+                        catalog_updated=catalog_updated,
+                    ),
+                )
             print("Dry run complete. Re-run with --apply after reviewing this plan.")
             return 0
 
+        applied_report = (
+            report_bytes(
+                intake_report(
+                    root,
+                    topic_plans,
+                    status="applied",
+                    delete_sidecars=args.delete_sidecars,
+                    output_name=args.output,
+                    catalog_updated=catalog_updated,
+                )
+            )
+            if report_path is not None
+            else None
+        )
         apply_plan(
             root,
-            topic_directory,
-            plans,
+            topic_plans,
             new_bib,
             new_main,
             output_path,
             args.delete_sidecars,
+            report_path,
+            applied_report,
         )
         print()
-        print(f"Applied {len(plans)} item(s) successfully.")
+        print(
+            f"Applied {len(plans)} item(s) across "
+            f"{len({topic.topic_path for topic in topic_plans})} topic(s) successfully."
+        )
         print(f"Updated: {bib_path.relative_to(root)}, {main_path.relative_to(root)}")
         print(f"Built: {output_path.relative_to(root)}")
+        if report_path is not None:
+            print(f"Report: {display_path(report_path, root)}")
         return 0
 
 
