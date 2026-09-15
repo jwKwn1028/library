@@ -65,7 +65,12 @@ identity-checked PDFs in ignored `Inbox/`. Use `--all` only when explicitly
 requested. `PAPER_LIBRARY_FETCH_EMAIL` enables Unpaywall at runtime and must
 never be stored or printed. The fetcher must not use cookies, credentials, or
 paywall bypasses and never edits canonical bibliography/catalog state; inspect
-each result and finish through the ordinary attachment manifest.
+each result and finish through the ordinary attachment manifest. For records it
+cannot reach, `--browser` only opens publisher pages in the user's own browser,
+optionally through the runtime `PAPER_LIBRARY_PROXY_PREFIX`; after the user
+downloads them, `--match <directory>` identifies the PDFs and `--apply` copies
+unique matches into `Inbox/`. Never read browser state, and keep proxy prefixes
+and browser commands out of public files.
 
 Preserve New Computer Modern Sans as the primary catalog face and the
 overridable `korean-font` input as its Hangul fallback. The checked-in default
@@ -80,4 +85,7 @@ export produced by `scripts/public-repo export <empty-directory>`. Use a
 public-safe Git name and provider no-reply author/committer address because the
 audit checks configured and reachable history identities. Standalone exports
 may ignore only known generated Python and lint/test caches; other unexpected
-paths remain audit failures. Run `scripts/test` after framework changes.
+paths remain audit failures. The audit also rejects institutional proxy URLs
+and every term listed in the Git-ignored `.paper-library-private-terms`; never
+copy that file's contents into public files. Run `scripts/test` after framework
+changes.

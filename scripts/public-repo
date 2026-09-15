@@ -108,6 +108,22 @@ CATALOG_CITATION_RE = re.compile(rb"(?m)@[a-z]+[0-9]{4}[a-z0-9]+")
 CATALOG_PRIVATE_CONFIG_RE = re.compile(
     rb'(?m)^#let catalog-(?:author|updated) = "(?!")[^"\r\n]+"\s*$'
 )
+PRIVATE_TERMS_FILE = Path(".paper-library-private-terms")
+MIN_PRIVATE_TERM_LENGTH = 3
+# Split literals keep this auditor's own source from matching its proxy checks.
+PROXY_PATH_MARKER_RE = re.compile(rb"_Lib_" rb"Proxy_Url", flags=re.IGNORECASE)
+PROXY_LOGIN_URL_RE = re.compile(
+    rb"https?://([A-Za-z0-9.-]+)(?::[0-9]+)?/[^\s\"'<>`)]*?login\?q?url=",
+    flags=re.IGNORECASE,
+)
+HOST_RE = re.compile(
+    rb"(?<![A-Za-z0-9.@-])((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})(?![A-Za-z0-9-])"
+)
+PROXY_HOST_LABEL_PREFIXES = (b"ezproxy", b"libproxy")
+PROXY_SERVICE_SUFFIXES = (b".idm.oclc.org", b".openathens.net")
+RESERVED_EXAMPLE_HOST_RE = re.compile(
+    rb"(?:^|\.)(?:example\.(?:com|net|org)|example|invalid|localhost|test)$"
+)
 
 
 class PublicRepoError(RuntimeError):
@@ -230,6 +246,7 @@ def check_ignore_policy(root: Path, errors: list[str]) -> None:
         Path("reports/private.intake-report.json"),
         Path("private.intake-report.json"),
         Path(".paper-library.lock"),
+        PRIVATE_TERMS_FILE,
     )
     for relative in private_examples:
         if not ignored_by_git(root, relative):
@@ -240,7 +257,56 @@ def check_ignore_policy(root: Path, errors: list[str]) -> None:
             errors.append(f"public sample/template is ignored: {relative.as_posix()}")
 
 
-def sensitive_patterns() -> list[tuple[str, re.Pattern[bytes]]]:
+def is_reserved_example_host(host: bytes) -> bool:
+    return RESERVED_EXAMPLE_HOST_RE.search(host.lower().rstrip(b".")) is not None
+
+
+def contains_institutional_proxy(data: bytes) -> bool:
+    """Detect library proxy links unless they use reserved documentation hosts."""
+    if PROXY_PATH_MARKER_RE.search(data):
+        return True
+    if any(
+        not is_reserved_example_host(match.group(1))
+        for match in PROXY_LOGIN_URL_RE.finditer(data)
+    ):
+        return True
+    for match in HOST_RE.finditer(data):
+        host = match.group(1).lower()
+        if is_reserved_example_host(host):
+            continue
+        if any(
+            label.startswith(PROXY_HOST_LABEL_PREFIXES) for label in host.split(b".")
+        ):
+            return True
+        if (b"." + host).endswith(PROXY_SERVICE_SUFFIXES):
+            return True
+    return False
+
+
+def private_terms(terms_root: Path) -> list[bytes]:
+    """Read the Git-ignored list of identifying terms the audit must reject."""
+    path = terms_root / PRIVATE_TERMS_FILE
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise PublicRepoError(f"cannot read {PRIVATE_TERMS_FILE}: {error}") from error
+    terms: list[bytes] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        term = line.strip()
+        if not term or term.startswith("#"):
+            continue
+        if len(term) < MIN_PRIVATE_TERM_LENGTH:
+            raise PublicRepoError(
+                f"{PRIVATE_TERMS_FILE} line {number} is shorter than "
+                f"{MIN_PRIVATE_TERM_LENGTH} characters"
+            )
+        terms.append(term.encode("utf-8"))
+    return terms
+
+
+def sensitive_patterns(terms_root: Path) -> list[tuple[str, re.Pattern[bytes]]]:
     patterns: list[tuple[str, re.Pattern[bytes]]] = [
         (
             "absolute home-directory path",
@@ -270,6 +336,11 @@ def sensitive_patterns() -> list[tuple[str, re.Pattern[bytes]]]:
                     flags=re.IGNORECASE,
                 ),
             )
+        )
+    # Findings name only the category and path, never the private term itself.
+    for term in private_terms(terms_root):
+        patterns.append(
+            ("private term", re.compile(re.escape(term), flags=re.IGNORECASE))
         )
     return patterns
 
@@ -335,6 +406,8 @@ def check_public_data(
         data
     ):
         errors.append(f"catalog template contains a non-empty private byline: {label}")
+    if contains_institutional_proxy(data):
+        errors.append(f"possible institutional proxy URL: {label}")
     for finding, pattern in patterns:
         if pattern.search(data):
             errors.append(f"possible {finding}: {label}")
@@ -469,10 +542,10 @@ def audit_configured_git_identities(root: Path, errors: list[str]) -> None:
             errors.append(f"configured Git {role} name contains the local username")
 
 
-def audit(root: Path) -> list[Path]:
+def audit(root: Path, terms_root: Path | None = None) -> list[Path]:
     files = publishable_files(root)
     errors: list[str] = []
-    patterns = sensitive_patterns()
+    patterns = sensitive_patterns(terms_root or root)
 
     check_ignore_policy(root, errors)
 
@@ -533,7 +606,8 @@ def export(root: Path, destination: Path) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target, follow_symlinks=False)
 
-    audit(destination)
+    # The export has no terms file of its own; keep enforcing the source's.
+    audit(destination, terms_root=root)
     print(f"Exported {len(files)} audited public files to {destination}")
 
 

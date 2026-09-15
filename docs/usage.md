@@ -609,9 +609,19 @@ parseable PDFs whose first pages match the expected DOI or title/author;
 publisher landing pages, login HTML, mismatched works, and oversized responses
 are rejected.
 
-The default sources are anonymous OpenAlex open-access locations, Crossref
-full-text metadata, and the DOI resolver. Unpaywall requires an identifying
-email; enable it for the current process without writing it to a file:
+Candidates are tried in this order:
+
+1. Unpaywall, when an identifying email is supplied at runtime;
+2. anonymous OpenAlex open-access locations;
+3. Semantic Scholar open-access copies, often institutional repositories;
+4. Crossref full-text links from the publisher;
+5. an arXiv preprint recorded by Semantic Scholar; and
+6. the DOI resolver.
+
+When a candidate returns an HTML landing page that declares the standard
+`citation_pdf_url` metadata, that PDF link is tried once. Unpaywall requires an
+identifying email; enable it for the current process without writing it to a
+file:
 
 ```sh
 PAPER_LIBRARY_FETCH_EMAIL="$CONTACT_EMAIL" \
@@ -620,8 +630,48 @@ PAPER_LIBRARY_FETCH_EMAIL="$CONTACT_EMAIL" \
 
 The value is sent only to APIs that accept or require it and is not printed or
 stored. The helper does not use browser cookies, institutional credentials, or
-access-control workarounds. Subscription-only items normally remain pending
-and require a manual, authorized download.
+access-control workarounds. Many publisher sites reject scripted requests even
+for free articles, so subscription and publisher-hosted items often remain
+unavailable to `--apply`.
+
+### Download the rest through your browser
+
+`--browser` hands each unresolved record's registered publisher page to your
+own browser, where you can sign in and download it. Combined with `--apply`, it
+opens only the records that could not be downloaded automatically; alone, it
+opens every selected record not already staged in `Inbox/`:
+
+```sh
+./scripts/fetch-pending --all --apply --browser
+```
+
+Two optional runtime variables control the handoff:
+
+| Variable | Purpose | Example |
+| --- | --- | --- |
+| `PAPER_LIBRARY_BROWSER` | Browser command; each URL is appended | `firefox --new-tab` |
+| `PAPER_LIBRARY_PROXY_PREFIX` | Institutional proxy prefix placed before each publisher URL | `https://proxy.example.org/login?url=` |
+
+Without `PAPER_LIBRARY_BROWSER`, the system default browser is used. Keep both
+values in your shell environment, not in repository files. The fetcher only
+opens URLs: sign-in, access decisions, and downloads remain yours, and it never
+reads browser profiles or cookies. Open tabs in modest `--key` batches to
+respect publisher and proxy usage terms.
+
+Once the PDFs are downloaded, identify them against the pending records:
+
+```sh
+./scripts/fetch-pending --match ~/Downloads
+./scripts/fetch-pending --match ~/Downloads --apply
+```
+
+`--match` accepts PDF files or directories (not recursively) and works
+offline. A PDF is copied to `Inbox/<citation-key>.pdf` only when its first
+pages match exactly one pending record by DOI or title; the original stays
+where it was. Ambiguous, duplicate, already staged, and unreadable PDFs are
+reported instead. Scanned PDFs without a text layer cannot be identified
+automatically; check their title pages and stage them with
+`scripts/stage-papers`.
 
 Fetching deliberately stops at `Inbox/`. Inspect each PDF and create the normal
 reviewed `attach: true` manifest with a canonical filename. The attachment
@@ -961,8 +1011,9 @@ the local library.
 
 `.gitignore` excludes the populated root catalog, every file beneath
 `Library/` regardless of type, all PDF/EPUB/MOBI files, all non-example BibTeX,
-RIS exports, inbox data, intake reports, manifests, the advisory lock, caches,
-local tool configuration, and common secret files.
+RIS exports, inbox data, intake reports, manifests, the advisory lock, the
+private audit terms file, caches, local tool configuration, and common secret
+files.
 
 The stronger gate is:
 
@@ -991,6 +1042,18 @@ catalog author or last-updated value in `templates/main.typ`. Reachable commit
 author and committer emails must be provider no-reply addresses (the reserved
 `example.invalid` and `example.test` domains are accepted for synthetic tests),
 and the local username cannot be used as the Git display name.
+
+It also rejects institutional proxy links: EZproxy and library-proxy hosts,
+OCLC and OpenAthens proxy services, N2S-style library proxy paths, and
+`…/login?url=` prefixes. Reserved documentation hosts such as `example.org`
+and `.test` domains remain allowed for examples.
+
+For identifying words no pattern can know, such as your institution, lab, or
+city, list them in the Git-ignored `.paper-library-private-terms` file at the
+repository root, one per line. Lines beginning with `#` are comments. Each term
+must be at least three characters and is matched case-insensitively as literal
+text in public files, staged blobs, and reachable history. `public-repo export`
+applies the source repository's terms to the exported tree as well.
 
 The audit reports finding categories and paths, not matched secret values. It
 fails closed: when adding an intentional public file, also add its exact
@@ -1085,6 +1148,8 @@ files.
 | `scripts/install-hooks` | Select checked-in Git hooks for this clone | Changes local Git config only |
 | `scripts/export-bibliography` | Export private metadata to `exports/library.ris` | Writes derived RIS output only |
 | `scripts/fetch-pending --key KEY [--apply]` | Discover or stage an accessible pending PDF | Writes only ignored `Inbox/` with `--apply` |
+| `scripts/fetch-pending --key KEY --browser` | Open the record's publisher page in your browser | No |
+| `scripts/fetch-pending --match PATH... [--apply]` | Identify browser-downloaded PDFs and stage unique matches | Writes only ignored `Inbox/` with `--apply` |
 | `scripts/export-bibliography --output PATH --force` | Replace a selected RIS export | Replaces derived RIS output only |
 | `scripts/stage-papers PATH...` | Validate and print a plan to copy external media into `Inbox/` | No |
 | `scripts/stage-papers PATH... --apply` | Copy verified media into `Inbox/` while preserving originals | Adds private inbox copies |

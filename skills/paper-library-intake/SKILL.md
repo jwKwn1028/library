@@ -108,14 +108,28 @@ documents. Keep `intake-papers` offline.
 2. Repeat with `--apply` to try accessible candidates. Downloads are bounded,
    must have a valid PDF signature/container, and must match the pending DOI or
    title-page identity before being written as `Inbox/<citation-key>.pdf`.
-   HTML landing/login pages and mismatched documents are rejected.
-3. The fetcher uses anonymous OpenAlex open-access locations, Crossref
-   full-text links, and the DOI resolver. Set `PAPER_LIBRARY_FETCH_EMAIL` only
-   at runtime to additionally query Unpaywall; never store or print the value.
+   HTML landing/login pages and mismatched documents are rejected; a landing
+   page's standard `citation_pdf_url` is followed once.
+3. Sources are tried in this order: Unpaywall (only when
+   `PAPER_LIBRARY_FETCH_EMAIL` is set at runtime; never store or print it),
+   anonymous OpenAlex open-access locations, Semantic Scholar open-access
+   copies, Crossref full-text links, arXiv preprints, and the DOI resolver.
    The helper does not use browser cookies, credentials, paywall bypasses, or
-   authenticated scraping. An inaccessible document remains pending for manual
-   download.
-4. Inspect every staged PDF, choose a reviewed canonical filename, and complete
+   authenticated scraping.
+4. For records that stay unavailable, add `--browser` (with `--apply`, only
+   unresolved records are opened). It opens each DOI's registered publisher
+   page in the user's browser (`PAPER_LIBRARY_BROWSER`, else the system
+   default), prefixed by `PAPER_LIBRARY_PROXY_PREFIX` for an institutional
+   proxy. The user signs in and downloads; the fetcher never reads browser
+   state or automates clicks. Keep both variables in the user's environment,
+   never in public files.
+5. Identify browser downloads with
+   `./scripts/fetch-pending --match <download-directory>`, then repeat with
+   `--apply`. Only PDFs whose first pages uniquely match one pending record's
+   DOI or title are copied to `Inbox/<citation-key>.pdf`; originals are
+   preserved. Ambiguous, duplicate, already staged, and text-less scanned PDFs
+   are reported for manual staging.
+6. Inspect every staged PDF, choose a reviewed canonical filename, and complete
    the ordinary `attach: true` manifest workflow. The fetcher intentionally
    does not edit `library.bib`, `main.typ`, or `Catalog.pdf`; the existing
    transactional intake performs those changes.

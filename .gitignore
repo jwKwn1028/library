@@ -10,6 +10,7 @@
 /paper-intake*.json
 *.intake-report.json
 /.paper-library.lock
+/.paper-library-private-terms
 *.pdf
 *.epub
 *.mobi

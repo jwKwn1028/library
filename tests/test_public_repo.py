@@ -27,7 +27,8 @@ class PublicRepositoryAuditTests(unittest.TestCase):
         auditor.chmod(0o755)
         (self.root / ".gitignore").write_text(
             "/main.typ\n/library.bib\n/Catalog.pdf\n/Library/\n"
-            "/exports/\n/Inbox/\n/reports/\n/.paper-library.lock\n*.pdf\n*.epub\n"
+            "/exports/\n/Inbox/\n/reports/\n/.paper-library.lock\n"
+            "/.paper-library-private-terms\n*.pdf\n*.epub\n"
             "*.mobi\n*.bib\n*.bibtex\n*.ris\n*.intake-report.json\n"
             "!examples/references.bib\n!templates/library.bib\n",
             encoding="utf-8",
@@ -166,6 +167,60 @@ class PublicRepositoryAuditTests(unittest.TestCase):
         self.assertIn(
             "catalog template contains a non-empty private byline", result.stderr
         )
+
+    def test_rejects_institutional_proxy_urls_but_allows_reserved_examples(
+        self,
+    ) -> None:
+        readme = self.root / "README.md"
+        readme.write_text(
+            "PAPER_LIBRARY_PROXY_PREFIX=https://proxy.example.org/login?url=\n",
+            encoding="utf-8",
+        )
+        allowed = self.audit()
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+        # Each synthetic proxy is split so this test file passes the real audit.
+        leaked_prefixes = (
+            "https://ez" + "proxy.library.university.ac.xx/login?url=",
+            "https://gateway.university.ac.xx/_Lib_" + "Proxy_Url/",
+            "https://login.university.ac.xx/" + "login?url=https://doi.org/10.0/x",
+            "https://university.idm" + ".oclc.org/login?url=",
+        )
+        for leaked in leaked_prefixes:
+            with self.subTest(leaked=leaked):
+                readme.write_text(f"Proxy: {leaked}\n", encoding="utf-8")
+                result = self.audit()
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    "possible institutional proxy URL: README.md (working tree)",
+                    result.stderr,
+                )
+
+    def test_private_terms_are_rejected_without_being_echoed(self) -> None:
+        (self.root / ".paper-library-private-terms").write_text(
+            "# Git-ignored identifying terms.\nSynthetic Institute\n",
+            encoding="utf-8",
+        )
+        (self.root / "README.md").write_text(
+            "Built at the synthetic institute library.\n", encoding="utf-8"
+        )
+
+        result = self.audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("possible private term: README.md (working tree)", result.stderr)
+        self.assertNotIn("synthetic institute", result.stderr.casefold())
+        self.assertNotIn(".paper-library-private-terms (working tree)", result.stderr)
+
+    def test_rejects_a_private_term_too_short_to_be_meaningful(self) -> None:
+        (self.root / ".paper-library-private-terms").write_text(
+            "ab\n", encoding="utf-8"
+        )
+
+        result = self.audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("line 1 is shorter than 3 characters", result.stderr)
 
 
 if __name__ == "__main__":

@@ -37,6 +37,10 @@
   still fail the public allowlist.
 - Do not write names, email addresses, usernames, home-directory paths, account
   identifiers, credentials, or real bibliography records into public files.
+- Keep identifying words the audit cannot infer, such as an institution or lab,
+  in the Git-ignored `.paper-library-private-terms` file, one term per line.
+  The audit rejects those terms and institutional proxy URLs in public files,
+  the index, and history without printing the matched value.
 
 ## Sources of truth
 
@@ -148,6 +152,15 @@ persist or print it. Do not capture browser cookies, automate institutional
 credentials, bypass access controls, or treat an HTML landing/login page as a
 document. Inspect each staged PDF before creating and applying its attachment
 manifest. Inaccessible records remain pending.
+
+For inaccessible records, `--browser` may hand each DOI's registered publisher
+page to the user's own browser (`PAPER_LIBRARY_BROWSER`), prefixed by the
+runtime `PAPER_LIBRARY_PROXY_PREFIX` for an institutional proxy. The user
+authenticates and downloads; the helper must never read browser profiles or
+cookies, drive the browser, or bulk-download through the proxy. `--match
+<paths>` then identifies downloaded PDFs offline and, with `--apply`, copies
+only unique first-page DOI or title matches into `Inbox/<citation-key>.pdf`.
+Keep proxy prefixes and browser commands out of public files.
 
 Retrieve web metadata when the local document and supplied sidecar do not
 provide a complete, internally consistent record, or when the user explicitly

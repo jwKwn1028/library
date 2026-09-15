@@ -212,13 +212,17 @@ but its files still participate in intake and staging duplicate checks.
 
 For a user-requested DOI-backed pending download, run
 `scripts/fetch-pending --key <citation-key>` before its `--apply` form. The
-networked helper may retrieve accessible candidates from Unpaywall, Crossref
-full-text metadata, anonymous OpenAlex open-access locations, or the DOI
-resolver, but writes only verified PDFs beneath `Inbox/`. Set
-`PAPER_LIBRARY_FETCH_EMAIL` at runtime to enable Unpaywall and never record that
-value. Treat unavailable, authenticated, HTML, oversized, or
+networked helper may retrieve accessible candidates from Unpaywall, anonymous
+OpenAlex open-access locations, Semantic Scholar open-access copies, Crossref
+full-text metadata, arXiv preprints, or the DOI resolver, following a landing
+page's `citation_pdf_url` at most once, but writes only verified PDFs beneath
+`Inbox/`. Set `PAPER_LIBRARY_FETCH_EMAIL` at runtime to enable Unpaywall and
+never record that value. Treat unavailable, authenticated, HTML, oversized, or
 identity-mismatched responses as unresolved; do not bypass access controls.
-After download, inspect the document and use the normal reviewed attachment
+`--browser` opens unresolved records' publisher pages in the user's browser,
+optionally through the runtime `PAPER_LIBRARY_PROXY_PREFIX`, and
+`--match <paths> [--apply]` copies uniquely identified browser downloads into
+`Inbox/` without changing the originals. After download, inspect the document and use the normal reviewed attachment
 manifest. `intake-papers` remains offline and is the only command that changes
 canonical bibliography/catalog state.
 
