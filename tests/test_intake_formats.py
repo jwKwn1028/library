@@ -258,6 +258,10 @@ class IntakeFormatTests(unittest.TestCase):
         for relative in destinations:
             self.assertIn(f"= {{{relative}}}", bibliography)
             self.assertIn(f'#link("{relative}")', catalog)
+        self.assertEqual(catalog.count("#link(<references>)"), 3)
+        self.assertIn(r"\[PDF\]", catalog)
+        self.assertIn(r"\[EPUB\]", catalog)
+        self.assertIn(r"\[MOBI\]", catalog)
         self.assertIn("@article{example2026pdfguide,", bibliography)
         self.assertIn("@book{example2026epubguide,", bibliography)
         self.assertIn("@book{example2026mobiguide,", bibliography)
@@ -645,10 +649,11 @@ class IntakeFormatTests(unittest.TestCase):
         relative = destination.relative_to(self.root).as_posix()
         self.assertIn(f"file      = {{{relative}}}", bibliography)
         self.assertIn(f'#link("{relative}")', catalog)
-        self.assertNotIn(
+        self.assertIn(
             '#link(<references>)[\n    #text("Synthetic edited pending book")',
             catalog,
         )
+        self.assertIn(r"\[EPUB\]", catalog)
         self.assertIn("editor    = {Editor, Erin}", bibliography)
         self.assertEqual(json.loads(self.run_status("--json").stdout), [])
 
@@ -841,8 +846,11 @@ class IntakeFormatTests(unittest.TestCase):
     def test_catalog_embeds_the_configured_korean_fallback(self) -> None:
         typst = shutil.which("typst")
         pdffonts = shutil.which("pdffonts")
-        if not typst or not pdffonts:
-            self.skipTest("typst and pdffonts are required for the font smoke test")
+        pdftotext = shutil.which("pdftotext")
+        if not typst or not pdffonts or not pdftotext:
+            self.skipTest(
+                "typst, pdffonts, and pdftotext are required for the catalog smoke test"
+            )
 
         available_fonts = subprocess.run(
             [typst, "fonts"],
@@ -885,6 +893,16 @@ class IntakeFormatTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(compilation.returncode, 0, compilation.stderr)
+
+        rendered_text = subprocess.run(
+            [pdftotext, str(output), "-"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(rendered_text.returncode, 0, rendered_text.stderr)
+        self.assertIn("Titles open References.", rendered_text.stdout)
 
         embedded_fonts = subprocess.run(
             [pdffonts, str(output)],

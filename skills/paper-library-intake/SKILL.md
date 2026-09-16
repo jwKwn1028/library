@@ -58,8 +58,9 @@ they are not safe to infer mechanically.
 7. If the plan matches the request, apply it. `--apply` moves local library
    files to `Library/<topic.path>/` when present, creates that topic directory
    even for a pending-only manifest, appends normalized entries to
-   `library.bib`, inserts titles linked directly to local media or, while
-   pending, to the labeled References section without visible status labels,
+   `library.bib`, inserts titles linked to the labeled References section and,
+   for local media, adds a separate bracketed format link without visible
+   pending-status labels,
    runs `scripts/validate-library.sh`, and atomically rebuilds `Catalog.pdf` in
    the root. It also sets the quoted private `catalog-updated` value to the
    current local date. The whole repeated-manifest batch is one transaction:

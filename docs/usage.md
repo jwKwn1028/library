@@ -587,10 +587,11 @@ attachment manifest for the record's existing topic:
 
 Run the ordinary dry run, inspect the `ATTACH` source and destination, then
 apply it. The transaction moves the file, fills the existing empty BibTeX
-`file` field, replaces the title's reference fallback with a direct media link,
-validates, and rebuilds the catalog. It does not create a second record or
-change metadata. An attachment is rejected if its key is absent, is no longer
-pending, appears ambiguously in the catalog, or belongs to another topic.
+`file` field, retains the title's References link, and adds a bracketed direct
+media link. It then validates and rebuilds the catalog. It does not create a
+second record or change metadata. An attachment is rejected if its key is
+absent, is no longer pending, appears ambiguously in the catalog, or belongs to
+another topic.
 
 ## Fetch accessible pending PDFs
 
@@ -769,9 +770,9 @@ An apply is transactional across every repeated `--manifest` argument:
    updates the parsed `file` value of its existing record;
 6. catalog headings with the same normalized identity are found, or the
    supplied naturally cased headings are created before the bibliography block;
-7. titles link directly to local media when present or to the References
-   section while pending, and citation keys are inserted without visible status
-   labels;
+7. every title links to the References section; local items also receive a
+   `[PDF]`, `[EPUB]`, or `[MOBI]` attachment link, and citation keys are
+   inserted without visible pending-status labels;
 8. the quoted private `catalog-updated` value is set to the current local date;
 9. writes to the two text sources are atomic;
 10. `scripts/validate-library.sh` runs;
@@ -884,8 +885,9 @@ It checks:
   directories, and readable Typst heading hierarchies;
 - exactly one catalog item per key, matching BibTeX and catalog titles, and no
   duplicate citations or links hidden by set deduplication;
-- an exact media link for every local record and a References-section fallback,
-  without a visible status label, for every pending record;
+- a References-section title link for every record, plus an exact,
+  correctly-labeled media link for every local record and no attachment or
+  visible status label for pending records;
 - canonical, safe, non-symlink paths rooted at `Library/` and an exact match
   between bibliography paths and all on-disk PDF/EPUB/MOBI files;
 - actual PDF, EPUB, and MOBI signatures/containers on every validation run;
@@ -929,6 +931,13 @@ typst compile \
 The selected family must appear in `typst fonts`. Keep the output in the
 repository root so its relative links to local PDF, EPUB, and MOBI files resolve
 correctly.
+
+Catalog titles always open the References section. A local item additionally
+shows `[PDF]`, `[EPUB]`, or `[MOBI]`, which opens its relative attachment. A
+PDF viewer cannot portably detect a failed external-file action and redirect
+automatically. Therefore, when a shared `Catalog.pdf` has no accompanying
+`Library/` tree, the viewer may report `File not found`; return to the catalog,
+select the linked title or citation, and follow the DOI or URL in References.
 
 The optional byline is controlled by private root variables:
 
@@ -1303,8 +1312,8 @@ Preserve these rules when extending the framework:
   contains no real topic headings, citations, or library-file links;
 - its `#bibliography(` anchor remains unindented so catalog insertion can find
   it;
-- its bibliography remains labeled `<references>` so pending titles have a
-  stable internal destination;
+- its bibliography remains labeled `<references>` so every title has a stable,
+  portable internal destination;
 - it retains the exact `#let bibliography-file = "library.bib"` declaration
   required by validation;
 - it retains New Computer Modern Sans as the primary face and an overridable
@@ -1320,9 +1329,9 @@ Preserve these rules when extending the framework:
 - the intake engine remains offline and manifest-driven;
 - the shared `paperlib/` parser and media checks remain the single
   interpretation used by intake, export, and validation;
-- pending attachment changes only an existing empty `file` field and replaces
-  its reference fallback with a direct catalog media link while the advisory
-  lock is held;
+- pending attachment changes only an existing empty `file` field and adds a
+  bracketed catalog media link while retaining the References title link and
+  holding the advisory lock;
 - staging copies explicit external media into ignored `Inbox/`, preserves the
   originals, and shares the advisory lock;
 - repeated topic manifests are preflighted and applied as one transaction;

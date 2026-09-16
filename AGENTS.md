@@ -90,8 +90,8 @@ When the document for a pending record arrives, inspect it and use an
 `attach: true` manifest item with the existing citation key, `source_file`, and
 `canonical_filename`. Do not submit it as a second record or edit the paired
 BibTeX/catalog paths by hand. The dry run and apply update only the existing
-empty `file` field and replace the catalog title's reference-section fallback
-with a direct media link while preserving its key and metadata. Use
+empty `file` field and add a bracketed direct-media link while retaining the
+catalog title's References link, key, and metadata. Use
 `scripts/intake-papers status --pending` (optionally `--json`) to list
 outstanding records.
 
@@ -270,9 +270,13 @@ directory, explain the ambiguity, and suggest a future category.
 
 - Mirror the directory hierarchy with readable headings in `main.typ`.
 - Add one official title and its citation key beneath the deepest topic
-  heading. Link the title directly to its PDF, EPUB, or MOBI file when present;
-  otherwise link it to the labeled References section without adding visible
-  download-status text. Keep the bibliography target labeled `<references>`.
+  heading. Always link the title to the labeled References section. When media
+  is present, add a separate `[PDF]`, `[EPUB]`, or `[MOBI]` link to the local
+  file; omit that link without adding visible download-status text while the
+  record is pending. Keep the bibliography target labeled `<references>`.
+- Keep the catalog's portability note: if a shared catalog cannot resolve a
+  local attachment and reports `File not found`, the reader can return to the
+  title or citation, reach References, and follow the bibliography URL.
 - Keep New Computer Modern Sans as the primary catalog font and the
   `korean-font` input as its Hangul fallback. Its default is
   `NanumGothicCoding`, the Korean sans-serif selected by this system's

@@ -55,7 +55,7 @@ class SemanticValidationTests(unittest.TestCase):
         self.assertEqual(result.errors, ())
         self.assertEqual((result.entries, result.files, result.pending), (1, 0, 1))
 
-    def test_rejects_pending_title_without_reference_fallback(self) -> None:
+    def test_rejects_pending_title_without_reference_link(self) -> None:
         catalog = VALID_CATALOG.replace(
             '#link(<references>)[#text("Synthetic Handbook")]',
             '#text("Synthetic Handbook")',
@@ -65,7 +65,7 @@ class SemanticValidationTests(unittest.TestCase):
         result = self.validate()
 
         self.assertIn(
-            "pending entry editor2024handbook must link its title to the references section",
+            "catalog entry editor2024handbook must link its title to the references section",
             result.errors,
         )
 
@@ -134,7 +134,9 @@ class SemanticValidationTests(unittest.TestCase):
         )
         catalog = VALID_CATALOG.replace(
             '- #link(<references>)[#text("Synthetic Handbook")]',
-            f'- #link("{relative}")[#text("Synthetic Handbook")]',
+            f'- #link(<references>)[#text("Synthetic Handbook")] '
+            f'#link("{relative}")['
+            '#text(size: 8pt, weight: "bold")[\\[PDF\\]]]',
         )
         (self.root / "library.bib").write_text(bibliography, encoding="utf-8")
         (self.root / "main.typ").write_text(catalog, encoding="utf-8")
@@ -143,6 +145,40 @@ class SemanticValidationTests(unittest.TestCase):
 
         self.assertTrue(
             any(error.startswith("invalid library media") for error in result.errors),
+            result.errors,
+        )
+        self.assertNotIn(
+            "catalog entry editor2024handbook must link its title to the references section",
+            result.errors,
+        )
+        self.assertNotIn(
+            "local entry editor2024handbook must show a [PDF] attachment link",
+            result.errors,
+        )
+
+    def test_rejects_local_item_without_portable_reference_title_link(self) -> None:
+        relative = "Library/PeripheralEsoteric/DigitalBooks/SyntheticHandbook.pdf"
+        destination = self.root / relative
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(b"not really a PDF")
+        bibliography = VALID_BIBLIOGRAPHY.replace(
+            "file       = {}", f"file       = {{{relative}}}"
+        )
+        catalog = VALID_CATALOG.replace(
+            '- #link(<references>)[#text("Synthetic Handbook")]',
+            f'- #link("{relative}")[#text("Synthetic Handbook")] "[PDF]"',
+        )
+        (self.root / "library.bib").write_text(bibliography, encoding="utf-8")
+        (self.root / "main.typ").write_text(catalog, encoding="utf-8")
+
+        result = self.validate()
+
+        self.assertIn(
+            "catalog entry editor2024handbook must link its title to the references section",
+            result.errors,
+        )
+        self.assertIn(
+            "local entry editor2024handbook must show a [PDF] attachment link",
             result.errors,
         )
 

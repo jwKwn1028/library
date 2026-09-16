@@ -11,8 +11,15 @@ HEADING_RE = re.compile(r"^(=+)\s+(.+?)\s*$")
 CITATION_RE = re.compile(r"(?<![A-Za-z0-9_-])@([A-Za-z0-9_-]+)")
 TRAILING_CITATION_RE = re.compile(r"@([A-Za-z0-9_-]+)\s*$")
 LINK_RE = re.compile(r'#link\s*\(\s*("(?:\\.|[^"\\])*")', re.DOTALL)
-REFERENCE_LINK_RE = re.compile(r"#link\s*\(\s*<references>\s*\)", re.DOTALL)
 TEXT_RE = re.compile(r'#text\s*\(\s*("(?:\\.|[^"\\])*")\s*\)', re.DOTALL)
+REFERENCE_TITLE_RE = re.compile(
+    r"#link\s*\(\s*<references>\s*\)\s*\[\s*#text\s*\(\s*"
+    r'("(?:\\.|[^"\\])*")\s*\)\s*\]',
+    re.DOTALL,
+)
+ATTACHMENT_LABEL_RE = re.compile(
+    r"#text\s*\([^)]*\)\s*\[\s*\\\[(PDF|EPUB|MOBI)\\\]\s*\]", re.DOTALL
+)
 
 
 class CatalogError(RuntimeError):
@@ -24,7 +31,8 @@ class CatalogItem:
     citation_key: str
     title: str
     path: str | None
-    reference_fallback: bool
+    reference_title_link: bool
+    attachment_format: str | None
     headings: tuple[str, ...]
     start: int
     end: int
@@ -108,8 +116,11 @@ def parse_catalog(text: str) -> list[CatalogItem]:
 
         link = LINK_RE.search(block)
         path = _decode_string(link.group(1), citation_key) if link else None
-        reference_fallback = REFERENCE_LINK_RE.search(block) is not None
-        title_match = TEXT_RE.search(block)
+        reference_title = REFERENCE_TITLE_RE.search(block)
+        reference_title_link = reference_title is not None
+        attachment_label = ATTACHMENT_LABEL_RE.search(block)
+        attachment_format = attachment_label.group(1) if attachment_label else None
+        title_match = reference_title or TEXT_RE.search(block)
         if title_match:
             title = _decode_string(title_match.group(1), citation_key)
         elif link:
@@ -123,7 +134,8 @@ def parse_catalog(text: str) -> list[CatalogItem]:
                 citation_key=citation_key,
                 title=title,
                 path=path,
-                reference_fallback=reference_fallback,
+                reference_title_link=reference_title_link,
+                attachment_format=attachment_format,
                 headings=tuple(headings),
                 start=start,
                 end=end,

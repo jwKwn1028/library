@@ -240,15 +240,17 @@ succeed.
 
 Every processed item has one record in `library.bib` and one citation under
 the matching hierarchy in `main.typ`. A local item has exactly one canonical
-PDF, EPUB, or MOBI file beneath `Library/` and a linked title. A pending item
-has an empty `file` field, a title linked to the catalog's labeled References
-section with no visible status label, and an empty `Library/<topic.path>/`
-destination directory. No placeholder media file is created. No DOI, key,
-non-empty file path, or local file content is duplicated. The validator passes
-and `Catalog.pdf` is rebuilt in the library root. The private
+PDF, EPUB, or MOBI file beneath `Library/`, a title linked to References, and a
+separate `[PDF]`, `[EPUB]`, or `[MOBI]` attachment link. A pending item has an
+empty `file` field, a title linked to the catalog's labeled References section
+with no visible status label, and an empty `Library/<topic.path>/` destination
+directory. No placeholder media file is created. No DOI, key, non-empty file
+path, or local file content is duplicated. The validator passes and
+`Catalog.pdf` is rebuilt in the library root. The private
 `catalog-updated` value records the successful intake's local calendar date; a
 dry run or rollback does not change it.
 
 For an attachment, the prior empty `file` field becomes the canonical path and
-the prior reference-section fallback becomes a direct media link. There is
-still exactly one BibTeX record and one catalog citation for the stable key.
+the catalog item gains a `[PDF]`, `[EPUB]`, or `[MOBI]` direct-media link while
+retaining its References-linked title. There is still exactly one BibTeX
+record and one catalog citation for the stable key.

@@ -294,18 +294,22 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
         if heading_path != tuple(keyword.casefold() for keyword in keywords):
             errors.append(f"catalog headings and BibTeX keywords differ for {key}")
         file_value = entry.fields.get("file", "").strip()
+        if not item.reference_title_link:
+            errors.append(
+                f"catalog entry {key} must link its title to the references section"
+            )
         if file_value and item.path != file_value:
             errors.append(f"catalog link and BibTeX file differ for {key}")
-        if file_value and item.reference_fallback:
-            errors.append(
-                f"local entry {key} must link its title only to its library file"
-            )
+        if file_value:
+            expected_format = Path(file_value).suffix.removeprefix(".").upper()
+            if item.attachment_format != expected_format:
+                errors.append(
+                    f"local entry {key} must show a [{expected_format}] attachment link"
+                )
         if not file_value and item.path is not None:
             errors.append(f"pending entry {key} must not link to a local file")
-        if not file_value and not item.reference_fallback:
-            errors.append(
-                f"pending entry {key} must link its title to the references section"
-            )
+        if not file_value and item.attachment_format is not None:
+            errors.append(f"pending entry {key} must not show a local attachment link")
 
     disk_paths, disk_errors = _disk_media(root)
     errors.extend(disk_errors)

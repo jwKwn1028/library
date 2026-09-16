@@ -1010,9 +1010,12 @@ def catalog_item(plan: ItemPlan, root: Path) -> list[str]:
     assert plan.target_file is not None
     relative_path = plan.target_file.relative_to(root).as_posix()
     path_literal = json.dumps(relative_path, ensure_ascii=False)
+    attachment_format = plan.target_file.suffix.removeprefix(".").upper()
     return [
-        f"- #link({path_literal})[",
+        "- #link(<references>)[",
         f"    #text({title_literal})",
+        f"  ] #link({path_literal})[",
+        f'    #text(size: 8pt, weight: "bold")[\\[{attachment_format}\\]]',
         f"  ] @{plan.citation_key}",
     ]
 
