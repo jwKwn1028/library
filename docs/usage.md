@@ -190,6 +190,8 @@ paper-library/
 │   └── validate-library.sh
 ├── skills/
 │   └── paper-library-intake/
+├── styles/
+│   └── title-link.csl       # renders titles as entry-specific citation links
 ├── templates/
 │   ├── library.bib
 │   └── main.typ
@@ -587,8 +589,8 @@ attachment manifest for the record's existing topic:
 
 Run the ordinary dry run, inspect the `ATTACH` source and destination, then
 apply it. The transaction moves the file, fills the existing empty BibTeX
-`file` field, retains the title's References link, and adds a bracketed direct
-media link. It then validates and rebuilds the catalog. It does not create a
+`file` field, retains the title's individual bibliography-entry link, and adds
+a bracketed direct media link. It then validates and rebuilds the catalog. It does not create a
 second record or change metadata. An attachment is rejected if its key is
 absent, is no longer pending, appears ambiguously in the catalog, or belongs to
 another topic.
@@ -770,7 +772,7 @@ An apply is transactional across every repeated `--manifest` argument:
    updates the parsed `file` value of its existing record;
 6. catalog headings with the same normalized identity are found, or the
    supplied naturally cased headings are created before the bibliography block;
-7. every title links to the References section; local items also receive a
+7. every title links to its individual entry in References; local items also receive a
    `[PDF]`, `[EPUB]`, or `[MOBI]` attachment link, and citation keys are
    inserted without visible pending-status labels;
 8. the quoted private `catalog-updated` value is set to the current local date;
@@ -932,12 +934,14 @@ The selected family must appear in `typst fonts`. Keep the output in the
 repository root so its relative links to local PDF, EPUB, and MOBI files resolve
 correctly.
 
-Catalog titles always open the References section. A local item additionally
-shows `[PDF]`, `[EPUB]`, or `[MOBI]`, which opens its relative attachment. A
-PDF viewer cannot portably detect a failed external-file action and redirect
-automatically. Therefore, when a shared `Catalog.pdf` has no accompanying
-`Library/` tree, the viewer may report `File not found`; return to the catalog,
-select the linked title or citation, and follow the DOI or URL in References.
+Catalog titles open their individual entries in References. The small public
+`styles/title-link.csl` file provides this custom-text citation link. A local
+item additionally shows `[PDF]`, `[EPUB]`, or `[MOBI]`, which opens its relative
+attachment. A PDF viewer cannot portably detect a failed external-file action
+and redirect automatically. Therefore, when a shared `Catalog.pdf` has no
+accompanying `Library/` tree, the viewer may report `File not found`; return to
+the catalog, select the linked title or citation, and follow the DOI or URL in
+References.
 This portability guidance is documentation only and is not printed in
 `Catalog.pdf`.
 
@@ -1314,8 +1318,10 @@ Preserve these rules when extending the framework:
   contains no real topic headings, citations, or library-file links;
 - its `#bibliography(` anchor remains unindented so catalog insertion can find
   it;
-- its bibliography remains labeled `<references>` so every title has a stable,
-  portable internal destination;
+- its bibliography remains labeled `<references>` and title links use the
+  dedicated citation-link style so every title has a specific internal destination;
+- `styles/title-link.csl` remains public and renders only the supplied title
+  text while preserving Typst's bibliography-entry hyperlink;
 - it retains the exact `#let bibliography-file = "library.bib"` declaration
   required by validation;
 - it retains New Computer Modern Sans as the primary face and an overridable

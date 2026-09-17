@@ -240,9 +240,9 @@ succeed.
 
 Every processed item has one record in `library.bib` and one citation under
 the matching hierarchy in `main.typ`. A local item has exactly one canonical
-PDF, EPUB, or MOBI file beneath `Library/`, a title linked to References, and a
-separate `[PDF]`, `[EPUB]`, or `[MOBI]` attachment link. A pending item has an
-empty `file` field, a title linked to the catalog's labeled References section
+PDF, EPUB, or MOBI file beneath `Library/`, a title linked to its bibliography
+entry, and a separate `[PDF]`, `[EPUB]`, or `[MOBI]` attachment link. A pending item has an
+empty `file` field, a title linked to its individual bibliography entry
 with no visible status label, and an empty `Library/<topic.path>/` destination
 directory. No placeholder media file is created. No DOI, key, non-empty file
 path, or local file content is duplicated. The validator passes and

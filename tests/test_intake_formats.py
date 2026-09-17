@@ -34,6 +34,7 @@ class IntakeFormatTests(unittest.TestCase):
         shutil.copy2(
             REPOSITORY_ROOT / "templates/library.bib", self.root / "library.bib"
         )
+        shutil.copytree(REPOSITORY_ROOT / "styles", self.root / "styles")
         validator = scripts / "validate-library.sh"
         shutil.copy2(REPOSITORY_ROOT / "scripts/validate-library.sh", validator)
         validator.chmod(0o755)
@@ -258,7 +259,12 @@ class IntakeFormatTests(unittest.TestCase):
         for relative in destinations:
             self.assertIn(f"= {{{relative}}}", bibliography)
             self.assertIn(f'#link("{relative}")', catalog)
-        self.assertEqual(catalog.count("#link(<references>)"), 3)
+        for item in items:
+            self.assertIn(
+                f"#reference-title(<{item['citation_key']}>)",
+                catalog,
+            )
+        self.assertEqual(catalog.count("#reference-title("), 3)
         self.assertIn(r"\[PDF\]", catalog)
         self.assertIn(r"\[EPUB\]", catalog)
         self.assertIn(r"\[MOBI\]", catalog)
@@ -568,7 +574,7 @@ class IntakeFormatTests(unittest.TestCase):
         self.assertIn("Synthetic pending paper", catalog)
         self.assertIn("@example2026pendingpaper", catalog)
         self.assertNotIn("download pending", catalog.casefold())
-        self.assertEqual(catalog.count("#link(<references>)"), 2)
+        self.assertEqual(catalog.count("#reference-title("), 2)
         self.assertTrue(
             (self.root / "Library/PeripheralEsoteric/DigitalBooks").is_dir()
         )
@@ -650,7 +656,8 @@ class IntakeFormatTests(unittest.TestCase):
         self.assertIn(f"file      = {{{relative}}}", bibliography)
         self.assertIn(f'#link("{relative}")', catalog)
         self.assertIn(
-            '#link(<references>)[\n    #text("Synthetic edited pending book")',
+            "#reference-title(<editor2026pendingbook>)[\n"
+            '    #text("Synthetic edited pending book")',
             catalog,
         )
         self.assertIn(r"\[EPUB\]", catalog)

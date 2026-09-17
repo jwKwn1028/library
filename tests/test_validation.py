@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 
@@ -22,12 +23,18 @@ VALID_BIBLIOGRAPHY = """% Synthetic private bibliography.
 """
 
 VALID_CATALOG = """#let bibliography-file = "library.bib"
+#let title-link-style = "styles/title-link.csl"
+#let reference-title(key, body) = cite(
+  key,
+  supplement: body,
+  style: title-link-style,
+)
 
 = Peripheral & Esoteric
 
 == Digital Books
 
-- #link(<references>)[#text("Synthetic Handbook")] @editor2024handbook
+- #reference-title(<editor2024handbook>)[#text("Synthetic Handbook")] #h(0pt) @editor2024handbook
 
 #bibliography(
   bibliography-file,
@@ -43,6 +50,11 @@ class SemanticValidationTests(unittest.TestCase):
         )
         self.addCleanup(self.temporary_directory.cleanup)
         self.root = Path(self.temporary_directory.name)
+        (self.root / "styles").mkdir()
+        shutil.copy2(
+            Path(__file__).resolve().parents[1] / "styles/title-link.csl",
+            self.root / "styles/title-link.csl",
+        )
         (self.root / "library.bib").write_text(VALID_BIBLIOGRAPHY, encoding="utf-8")
         (self.root / "main.typ").write_text(VALID_CATALOG, encoding="utf-8")
 
@@ -57,7 +69,7 @@ class SemanticValidationTests(unittest.TestCase):
 
     def test_rejects_pending_title_without_reference_link(self) -> None:
         catalog = VALID_CATALOG.replace(
-            '#link(<references>)[#text("Synthetic Handbook")]',
+            '#reference-title(<editor2024handbook>)[#text("Synthetic Handbook")]',
             '#text("Synthetic Handbook")',
         )
         (self.root / "main.typ").write_text(catalog, encoding="utf-8")
@@ -65,7 +77,19 @@ class SemanticValidationTests(unittest.TestCase):
         result = self.validate()
 
         self.assertIn(
-            "catalog entry editor2024handbook must link its title to the references section",
+            "catalog entry editor2024handbook must link its title to its bibliography entry",
+            result.errors,
+        )
+
+    def test_rejects_title_link_to_another_bibliography_entry(self) -> None:
+        catalog = VALID_CATALOG.replace("<editor2024handbook>", "<other2024record>", 1)
+        (self.root / "main.typ").write_text(catalog, encoding="utf-8")
+
+        result = self.validate()
+
+        self.assertIn(
+            "catalog entry editor2024handbook links its title to bibliography entry "
+            "other2024record",
             result.errors,
         )
 
@@ -78,6 +102,18 @@ class SemanticValidationTests(unittest.TestCase):
         self.assertIn(
             "main.typ must label its bibliography <references> exactly once",
             result.errors,
+        )
+
+    def test_rejects_a_noncanonical_reference_title_helper(self) -> None:
+        catalog = VALID_CATALOG.replace(
+            "style: title-link-style,", "style: citation-style,"
+        )
+        (self.root / "main.typ").write_text(catalog, encoding="utf-8")
+
+        result = self.validate()
+
+        self.assertIn(
+            "main.typ must define the canonical reference-title helper", result.errors
         )
 
     def test_at_sign_inside_title_is_not_mistaken_for_a_citation(self) -> None:
@@ -96,7 +132,8 @@ class SemanticValidationTests(unittest.TestCase):
         catalog = (self.root / "main.typ").read_text(encoding="utf-8")
         catalog = catalog.replace(
             "#bibliography(",
-            '- #link(<references>)[#text("Synthetic Handbook")] '
+            "- #reference-title(<editor2024handbook>)["
+            '#text("Synthetic Handbook")] #h(0pt) '
             "@editor2024handbook\n\n#bibliography(",
         )
         (self.root / "main.typ").write_text(catalog, encoding="utf-8")
@@ -133,8 +170,9 @@ class SemanticValidationTests(unittest.TestCase):
             "file       = {}", f"file       = {{{relative}}}"
         )
         catalog = VALID_CATALOG.replace(
-            '- #link(<references>)[#text("Synthetic Handbook")]',
-            f'- #link(<references>)[#text("Synthetic Handbook")] '
+            '- #reference-title(<editor2024handbook>)[#text("Synthetic Handbook")]',
+            f"- #reference-title(<editor2024handbook>)["
+            f'#text("Synthetic Handbook")] #h(0pt) '
             f'#link("{relative}")['
             '#text(size: 8pt, weight: "bold")[\\[PDF\\]]]',
         )
@@ -148,7 +186,7 @@ class SemanticValidationTests(unittest.TestCase):
             result.errors,
         )
         self.assertNotIn(
-            "catalog entry editor2024handbook must link its title to the references section",
+            "catalog entry editor2024handbook must link its title to its bibliography entry",
             result.errors,
         )
         self.assertNotIn(
@@ -156,7 +194,7 @@ class SemanticValidationTests(unittest.TestCase):
             result.errors,
         )
 
-    def test_rejects_local_item_without_portable_reference_title_link(self) -> None:
+    def test_rejects_local_item_without_bibliography_entry_title_link(self) -> None:
         relative = "Library/PeripheralEsoteric/DigitalBooks/SyntheticHandbook.pdf"
         destination = self.root / relative
         destination.parent.mkdir(parents=True)
@@ -165,7 +203,7 @@ class SemanticValidationTests(unittest.TestCase):
             "file       = {}", f"file       = {{{relative}}}"
         )
         catalog = VALID_CATALOG.replace(
-            '- #link(<references>)[#text("Synthetic Handbook")]',
+            '- #reference-title(<editor2024handbook>)[#text("Synthetic Handbook")]',
             f'- #link("{relative}")[#text("Synthetic Handbook")] "[PDF]"',
         )
         (self.root / "library.bib").write_text(bibliography, encoding="utf-8")
@@ -174,7 +212,7 @@ class SemanticValidationTests(unittest.TestCase):
         result = self.validate()
 
         self.assertIn(
-            "catalog entry editor2024handbook must link its title to the references section",
+            "catalog entry editor2024handbook must link its title to its bibliography entry",
             result.errors,
         )
         self.assertIn(

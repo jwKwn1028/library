@@ -6,8 +6,14 @@
 #let catalog-updated = ""
 #let citation-style = sys.inputs.at("style", default: "apa")
 #let bibliography-file = "library.bib"
+#let title-link-style = "styles/title-link.csl"
 #let korean-font = sys.inputs.at("korean-font", default: "NanumGothicCoding")
 #let catalog-fonts = ("New Computer Modern Sans", korean-font)
+#let reference-title(key, body) = cite(
+  key,
+  supplement: body,
+  style: title-link-style,
+)
 
 #set document(title: catalog-title, author: catalog-author)
 #set page(paper: "a4", margin: (x: 25mm, y: 23mm), numbering: "1")

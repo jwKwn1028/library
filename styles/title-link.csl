@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<style xmlns="http://purl.org/net/xbiblio/csl" version="1.0" class="in-text">
+  <info>
+    <title>Paper Library Title Link</title>
+    <id>https://example.invalid/styles/paper-library-title-link</id>
+    <link href="https://example.invalid/styles/paper-library-title-link" rel="self"/>
+    <updated>2026-09-17T00:00:00+00:00</updated>
+  </info>
+  <citation>
+    <layout>
+      <text variable="locator"/>
+    </layout>
+  </citation>
+</style>

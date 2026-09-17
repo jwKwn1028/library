@@ -47,6 +47,7 @@ PUBLIC_FILES = {
     Path("scripts/stage-papers"),
     Path("scripts/test"),
     Path("scripts/validate-library.sh"),
+    Path("styles/title-link.csl"),
     Path("skills/paper-library-intake/SKILL.md"),
     Path("skills/paper-library-intake/agents/openai.yaml"),
     Path("skills/paper-library-intake/references/intake-contract.md"),

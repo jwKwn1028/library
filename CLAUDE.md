@@ -47,10 +47,10 @@ empty; never copy a private byline into public files.
 For an explicitly requested metadata-only reading list, verify each complete
 record from authoritative web sources, use `pending: true`, and omit
 `source_file` and `canonical_filename`. Never invent a local path or create a
-placeholder document. Pending titles link to the catalog's References section
-without visible status text, their BibTeX `file` fields stay empty, and apply
-creates the empty destination topic directory under `Library/` for the future
-file. Every title remains linked to References; a local item also has a
+placeholder document. Pending titles link to their individual bibliography
+entries without visible status text, their BibTeX `file` fields stay empty,
+and apply creates the empty destination topic directory under `Library/` for
+the future file. Every title retains that link; a local item also has a
 separate `[PDF]`, `[EPUB]`, or `[MOBI]` attachment link. Keep the explanation
 of missing local attachments in public documentation rather than displaying it
 inside the generated catalog.

@@ -98,10 +98,13 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
     errors: list[str] = []
     bib_path = root / "library.bib"
     main_path = root / "main.typ"
+    title_link_style_path = root / "styles/title-link.csl"
     if not bib_path.is_file():
         errors.append("missing bibliography: library.bib")
     if not main_path.is_file():
         errors.append("missing catalog source: main.typ")
+    if not title_link_style_path.is_file():
+        errors.append("missing catalog title-link style: styles/title-link.csl")
     if errors:
         return ValidationResult(0, 0, 0, tuple(errors))
 
@@ -131,6 +134,20 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
     )
     if len(bibliography_targets) != 1:
         errors.append("main.typ must label its bibliography <references> exactly once")
+    title_link_style_bindings = re.findall(
+        r'(?m)^#let\s+title-link-style\s*=\s*"styles/title-link\.csl"\s*$',
+        main_text,
+    )
+    if len(title_link_style_bindings) != 1:
+        errors.append("main.typ must select styles/title-link.csl exactly once")
+    reference_title_helpers = re.findall(
+        r"(?ms)^#let\s+reference-title\s*\(\s*key\s*,\s*body\s*\)\s*=\s*"
+        r"cite\s*\(\s*key\s*,\s*supplement:\s*body\s*,\s*"
+        r"style:\s*title-link-style\s*,?\s*\)\s*$",
+        main_text,
+    )
+    if len(reference_title_helpers) != 1:
+        errors.append("main.typ must define the canonical reference-title helper")
 
     keys = [entry.citation_key for entry in entries]
     for key in keys:
@@ -294,9 +311,14 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
         if heading_path != tuple(keyword.casefold() for keyword in keywords):
             errors.append(f"catalog headings and BibTeX keywords differ for {key}")
         file_value = entry.fields.get("file", "").strip()
-        if not item.reference_title_link:
+        if item.reference_title_key is None:
             errors.append(
-                f"catalog entry {key} must link its title to the references section"
+                f"catalog entry {key} must link its title to its bibliography entry"
+            )
+        elif item.reference_title_key != key:
+            errors.append(
+                f"catalog entry {key} links its title to bibliography entry "
+                f"{item.reference_title_key}"
             )
         if file_value and item.path != file_value:
             errors.append(f"catalog link and BibTeX file differ for {key}")

@@ -1002,9 +1002,9 @@ def catalog_item(plan: ItemPlan, root: Path) -> list[str]:
     title_literal = json.dumps(plan.display_title, ensure_ascii=False)
     if plan.pending:
         return [
-            "- #link(<references>)[",
+            f"- #reference-title(<{plan.citation_key}>)[",
             f"    #text({title_literal})",
-            f"  ] @{plan.citation_key}",
+            f"  ] #h(0pt) @{plan.citation_key}",
         ]
 
     assert plan.target_file is not None
@@ -1012,9 +1012,9 @@ def catalog_item(plan: ItemPlan, root: Path) -> list[str]:
     path_literal = json.dumps(relative_path, ensure_ascii=False)
     attachment_format = plan.target_file.suffix.removeprefix(".").upper()
     return [
-        "- #link(<references>)[",
+        f"- #reference-title(<{plan.citation_key}>)[",
         f"    #text({title_literal})",
-        f"  ] #link({path_literal})[",
+        f"  ] #h(0pt) #link({path_literal})[",
         f'    #text(size: 8pt, weight: "bold")[\\[{attachment_format}\\]]',
         f"  ] @{plan.citation_key}",
     ]

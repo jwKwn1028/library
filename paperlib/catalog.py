@@ -13,6 +13,12 @@ TRAILING_CITATION_RE = re.compile(r"@([A-Za-z0-9_-]+)\s*$")
 LINK_RE = re.compile(r'#link\s*\(\s*("(?:\\.|[^"\\])*")', re.DOTALL)
 TEXT_RE = re.compile(r'#text\s*\(\s*("(?:\\.|[^"\\])*")\s*\)', re.DOTALL)
 REFERENCE_TITLE_RE = re.compile(
+    r"#reference-title\s*\(\s*<([A-Za-z0-9_-]+)>\s*\)\s*"
+    r"\[\s*#text\s*\(\s*"
+    r'("(?:\\.|[^"\\])*")\s*\)\s*\]',
+    re.DOTALL,
+)
+LEGACY_REFERENCE_TITLE_RE = re.compile(
     r"#link\s*\(\s*<references>\s*\)\s*\[\s*#text\s*\(\s*"
     r'("(?:\\.|[^"\\])*")\s*\)\s*\]',
     re.DOTALL,
@@ -31,7 +37,7 @@ class CatalogItem:
     citation_key: str
     title: str
     path: str | None
-    reference_title_link: bool
+    reference_title_key: str | None
     attachment_format: str | None
     headings: tuple[str, ...]
     start: int
@@ -117,11 +123,15 @@ def parse_catalog(text: str) -> list[CatalogItem]:
         link = LINK_RE.search(block)
         path = _decode_string(link.group(1), citation_key) if link else None
         reference_title = REFERENCE_TITLE_RE.search(block)
-        reference_title_link = reference_title is not None
+        legacy_reference_title = LEGACY_REFERENCE_TITLE_RE.search(block)
+        reference_title_key = reference_title.group(1) if reference_title else None
         attachment_label = ATTACHMENT_LABEL_RE.search(block)
         attachment_format = attachment_label.group(1) if attachment_label else None
-        title_match = reference_title or TEXT_RE.search(block)
-        if title_match:
+        if reference_title:
+            title = _decode_string(reference_title.group(2), citation_key)
+        elif legacy_reference_title:
+            title = _decode_string(legacy_reference_title.group(1), citation_key)
+        elif title_match := TEXT_RE.search(block):
             title = _decode_string(title_match.group(1), citation_key)
         elif link:
             title = _raw_link_title(block, citation_key) or ""
@@ -134,7 +144,7 @@ def parse_catalog(text: str) -> list[CatalogItem]:
                 citation_key=citation_key,
                 title=title,
                 path=path,
-                reference_title_link=reference_title_link,
+                reference_title_key=reference_title_key,
                 attachment_format=attachment_format,
                 headings=tuple(headings),
                 start=start,

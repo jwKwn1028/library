@@ -91,7 +91,7 @@ When the document for a pending record arrives, inspect it and use an
 `canonical_filename`. Do not submit it as a second record or edit the paired
 BibTeX/catalog paths by hand. The dry run and apply update only the existing
 empty `file` field and add a bracketed direct-media link while retaining the
-catalog title's References link, key, and metadata. Use
+catalog title's individual bibliography-entry link, key, and metadata. Use
 `scripts/intake-papers status --pending` (optionally `--json`) to list
 outstanding records.
 
@@ -270,10 +270,10 @@ directory, explain the ambiguity, and suggest a future category.
 
 - Mirror the directory hierarchy with readable headings in `main.typ`.
 - Add one official title and its citation key beneath the deepest topic
-  heading. Always link the title to the labeled References section. When media
-  is present, add a separate `[PDF]`, `[EPUB]`, or `[MOBI]` link to the local
+  heading. Always link the title to its individual bibliography entry. When
+  media is present, add a separate `[PDF]`, `[EPUB]`, or `[MOBI]` link to the local
   file; omit that link without adding visible download-status text while the
-  record is pending. Keep the bibliography target labeled `<references>`.
+  record is pending. Keep the bibliography section labeled `<references>`.
 - Keep attachment-portability guidance in `docs/usage.md`, not as visible text
   in the generated catalog.
 - Keep New Computer Modern Sans as the primary catalog font and the

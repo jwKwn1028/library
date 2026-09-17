@@ -58,7 +58,8 @@ they are not safe to infer mechanically.
 7. If the plan matches the request, apply it. `--apply` moves local library
    files to `Library/<topic.path>/` when present, creates that topic directory
    even for a pending-only manifest, appends normalized entries to
-   `library.bib`, inserts titles linked to the labeled References section and,
+   `library.bib`, inserts titles linked to their individual bibliography
+   entries and,
    for local media, adds a separate bracketed format link without visible
    pending-status labels,
    runs `scripts/validate-library.sh`, and atomically rebuilds `Catalog.pdf` in
