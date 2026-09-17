@@ -39,12 +39,6 @@
   ]
 ]
 
-#align(center)[
-  #text(size: 8pt, fill: luma(90))[
-    Titles open References. Bracketed format links open local attachments; if a viewer reports File not found, return here, select the title or citation, and follow the bibliography URL.
-  ]
-]
-
 // The intake engine inserts topic headings and catalog citations here.
 
 #bibliography(

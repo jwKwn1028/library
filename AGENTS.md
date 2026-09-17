@@ -274,9 +274,8 @@ directory, explain the ambiguity, and suggest a future category.
   is present, add a separate `[PDF]`, `[EPUB]`, or `[MOBI]` link to the local
   file; omit that link without adding visible download-status text while the
   record is pending. Keep the bibliography target labeled `<references>`.
-- Keep the catalog's portability note: if a shared catalog cannot resolve a
-  local attachment and reports `File not found`, the reader can return to the
-  title or citation, reach References, and follow the bibliography URL.
+- Keep attachment-portability guidance in `docs/usage.md`, not as visible text
+  in the generated catalog.
 - Keep New Computer Modern Sans as the primary catalog font and the
   `korean-font` input as its Hangul fallback. Its default is
   `NanumGothicCoding`, the Korean sans-serif selected by this system's

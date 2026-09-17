@@ -902,7 +902,7 @@ class IntakeFormatTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(rendered_text.returncode, 0, rendered_text.stderr)
-        self.assertIn("Titles open References.", rendered_text.stdout)
+        self.assertNotIn("Titles open References.", rendered_text.stdout)
 
         embedded_fonts = subprocess.run(
             [pdffonts, str(output)],

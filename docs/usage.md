@@ -938,6 +938,8 @@ PDF viewer cannot portably detect a failed external-file action and redirect
 automatically. Therefore, when a shared `Catalog.pdf` has no accompanying
 `Library/` tree, the viewer may report `File not found`; return to the catalog,
 select the linked title or citation, and follow the DOI or URL in References.
+This portability guidance is documentation only and is not printed in
+`Catalog.pdf`.
 
 The optional byline is controlled by private root variables:
 

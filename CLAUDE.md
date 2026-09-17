@@ -51,9 +51,9 @@ placeholder document. Pending titles link to the catalog's References section
 without visible status text, their BibTeX `file` fields stay empty, and apply
 creates the empty destination topic directory under `Library/` for the future
 file. Every title remains linked to References; a local item also has a
-separate `[PDF]`, `[EPUB]`, or `[MOBI]` attachment link. Preserve the catalog
-note that directs readers who see `File not found` back to the linked title or
-citation and then to the bibliography URL.
+separate `[PDF]`, `[EPUB]`, or `[MOBI]` attachment link. Keep the explanation
+of missing local attachments in public documentation rather than displaying it
+inside the generated catalog.
 
 List pending records with `scripts/intake-papers status --pending`. When one is
 downloaded, use an `attach: true` manifest item with its existing citation key;
