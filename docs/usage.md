@@ -147,9 +147,10 @@ modification. This makes the command safe to rerun and prevents a template from
 overwriting a populated library.
 
 `install-hooks` sets this clone's `core.hooksPath` to `.githooks`. The
-pre-commit and pre-push hooks run the publication privacy audit. Git does not
-activate repository-provided hooks automatically, so run this command once in
-every new clone.
+pre-commit and pre-push hooks run the publication privacy audit, and the
+commit-msg hook checks each new commit message. Git does not activate
+repository-provided hooks automatically, so run this command once in every new
+clone.
 
 Verify setup without exposing ignored content:
 
@@ -171,7 +172,8 @@ one item has been successfully added.
 ```text
 paper-library/
 ├── AGENTS.md
-├── CLAUDE.md
+├── CLAUDE.md                 # imports AGENTS.md for Claude Code
+├── LICENSE                   # MIT, public framework only
 ├── README.md
 ├── docs/
 │   └── usage.md
@@ -183,6 +185,7 @@ paper-library/
 │   └── intake-manifest.schema.json
 ├── scripts/
 │   ├── export-bibliography
+│   ├── fetch-pending
 │   ├── init-library
 │   ├── install-hooks
 │   ├── intake-papers
@@ -235,10 +238,11 @@ without modifying the originals. Staging rejects symlinks, invalid media,
 destination collisions, and duplicate content already present in the batch,
 `Inbox/`, or `Library/`; it uses the same advisory lock as intake.
 
-`Inbox/` is intentionally excluded from canonical orphan validation, so
-unrelated staged documents may wait there while another batch is applied. They
-still participate in duplicate-content checks. Only files beneath `Library/`
-are canonical attachments. For several items going to one topic, include them
+The validator scans only `Library/` for canonical media, so unrelated staged
+documents may wait in `Inbox/` while another batch is applied, and notes or
+exports elsewhere in the root are ignored. Intake, staging, and `fetch-pending
+--match` still compare new content with everything in `Library/` and `Inbox/`.
+Only files beneath `Library/` are canonical attachments. For several items going to one topic, include them
 in one manifest; for several topics, prepare one manifest per topic and submit
 all of them in the same intake command.
 
@@ -299,7 +303,7 @@ Choose the narrowest existing directory that matches the item's primary
 contribution. Prefer an existing taxonomy over creating a category. Create a
 new PascalCase topic only when no clean existing fit exists, the subject is
 broader than one item, and the category is likely to recur. Keep books, films,
-and albums out of `Perspectives`, the catch-all for adjacent research: a book
+and albums out of `AdjacentFields`, the catch-all for adjacent research: a book
 belongs under its subject topic or `Literature`, a film under `Film`, and an
 album under `Music`.
 
@@ -436,11 +440,17 @@ Without `--apply`, no library file is changed. Review every printed value:
 - normalized ISBN-13, when present;
 - normalized `imdb`, `musicbrainz`, and `wikidata` identifiers (`ID` lines);
 - the `[URL]` link target of an album or film (`LINK` line);
+- any reviewed `distinct_from` assertion (`DISTINCT FROM` line);
 - metadata provenance URLs, when present;
 - sidecar disposition;
 - topic path and readable heading hierarchy;
 - the `Library/<topic.path>/` directory that apply will create if absent;
 - output catalog name.
+
+The dry run also applies the validator's text rules to the planned
+`library.bib` and `main.typ`. A plan that the post-apply validation would
+reject, including one blocked by an existing inconsistency, fails here with
+the same messages before anything changes.
 
 Treat any discrepancy as a manifest problem. Correct the JSON and rerun the dry
 run; do not weaken a validation rule to force an uncertain record through.
@@ -642,17 +652,24 @@ are rejected.
 
 Candidates are tried in this order:
 
-1. Unpaywall, when an identifying email is supplied at runtime;
-2. anonymous OpenAlex open-access locations;
-3. Semantic Scholar open-access copies, often institutional repositories;
-4. Crossref full-text links from the publisher;
-5. an arXiv preprint recorded by Semantic Scholar; and
-6. the DOI resolver.
+1. Unpaywall open-access locations, when an identifying email is supplied at
+   runtime;
+2. Semantic Scholar open-access copies, often institutional repositories;
+3. Crossref full-text links from the publisher;
+4. preprints: an arXiv copy recorded by Semantic Scholar, then any preprint
+   the publisher registered with Crossref (`has-preprint`), such as arXiv,
+   ChemRxiv, or bioRxiv; and
+5. the DOI resolver.
 
 When a candidate returns an HTML landing page that declares the standard
-`citation_pdf_url` metadata, that PDF link is tried once. Unpaywall requires an
-identifying email; enable it for the current process without writing it to a
-file:
+`citation_pdf_url` metadata, that PDF link is tried once. Several preprint
+servers answer scripted requests with a bot check, so non-arXiv preprints often
+still need the browser handoff below.
+
+OpenAlex is no longer queried. It has required an API key since February 2026,
+and Unpaywall now serves the same open-access location data. Unpaywall
+requires an identifying email; enable it for the current process without
+writing it to a file:
 
 ```sh
 PAPER_LIBRARY_FETCH_EMAIL="$CONTACT_EMAIL" \
@@ -699,7 +716,9 @@ Once the PDFs are downloaded, identify them against the pending records:
 `--match` accepts PDF files or directories (not recursively) and works
 offline. A PDF is copied to `Inbox/<citation-key>.pdf` only when its first
 pages match exactly one pending record by DOI or title; the original stays
-where it was. Ambiguous, duplicate, already staged, and unreadable PDFs are
+where it was. A title shorter than four words is often a common phrase, so its
+match also needs the first author's or editor's family name as a whole word.
+Downloads from `--apply` pass the same identity check. Ambiguous, duplicate, already staged, and unreadable PDFs are
 reported instead. Scanned PDFs without a text layer cannot be identified
 automatically; check their title pages and stage them with
 `scripts/stage-papers`.
@@ -816,7 +835,7 @@ Rules specific to albums and films:
 - Prefer a full `YYYY-MM-DD` release date: Typst's APA style renders a
   year-only audiovisual date as `(2026,)`.
 - File albums under `Music` and films under `Film`, never under
-  `Perspectives`.
+  `AdjacentFields`.
 
 `scripts/fetch-pending` ignores albums and films, even when a film carries an
 EIDR DOI.
@@ -850,6 +869,7 @@ Item keys:
 | `title` | yes | Plain Unicode work title; structured subtitle and numbered-series fields are added to the catalog label |
 | `bib_title` | no | BibTeX title with capitalization braces if needed |
 | `metadata_sources` | no | Unique HTTP(S) URLs used to verify metadata; retained only in reports |
+| `distinct_from` | no | Citation keys of verified distinct works that share this item's normalized title; see below |
 | `fields` | yes | Reviewed BibTeX fields |
 | `sidecars` | no | Array of `.bib` or `.bibtex` files inside the root |
 
@@ -873,13 +893,31 @@ printed in the plan and copied into an optional private intake report, but are
 not written to `library.bib` or `main.typ`. Avoid signed URLs, private query
 parameters, or any provenance location that itself contains sensitive data.
 
+`distinct_from` is the reviewed exception to title-based duplicate detection.
+A new record whose normalized catalog title matches an existing record is
+rejected, because the usual cause is a second copy of the same work: a
+preprint and its published version, a paperback and hardcover, or a
+re-download. Albums and films also compare the release year and first creator.
+When the records are genuinely different works, such as a review article and
+a textbook that share a title, verify that and list every matching key:
+
+```json
+"distinct_from": ["example2015syntheticlearning"]
+```
+
+The engine rejects the item unless the list names exactly the records that
+share its identity. It stores the assertion as a `distinctfrom` BibTeX field,
+which the validator requires for every pair of records with the same identity.
+Only a new record carries this key; it is never used for attachments.
+
 Field rules:
 
 - at least one of `author` or `editor` is required;
 - either `date` or `year` is required;
 - dates use `YYYY`, `YYYY-MM`, or `YYYY-MM-DD`, and a supplied `year` must
   agree with `date`;
-- `title`, `keywords`, and `file` are reserved and cannot appear in `fields`;
+- `title`, `keywords`, `file`, and `distinctfrom` are reserved and cannot
+  appear in `fields`;
 - `subtitle` remains a separate BibLaTeX field and is displayed as
   `title: subtitle` in the catalog topic list;
 - a numbered series uses the individual work in `title`, its collection in
@@ -887,7 +925,8 @@ Field rules:
   `series #number: title: subtitle`, omitting absent segments;
 - field names begin with a letter and contain only letters, numbers,
   underscores, or hyphens;
-- field values are normalized to single spaces and must have balanced braces;
+- field values are normalized to single spaces, must have balanced braces,
+  and cannot end in an unpaired backslash;
 - a DOI can be supplied bare, with a `doi:` prefix, or as a DOI URL;
 - the engine stores a bare DOI and adds its URL when `url` is absent;
 - one ISBN-10 or ISBN-13 may identify the cataloged edition; its checksum must
@@ -915,8 +954,9 @@ An apply is transactional across every repeated `--manifest` argument:
 
 1. an advisory `.paper-library.lock` is acquired so concurrent commands cannot
    overwrite one another;
-2. preflight validates every manifest in command-line order and checks both
-   current-state and cross-manifest duplicates;
+2. preflight validates every manifest in command-line order, checks both
+   current-state and cross-manifest duplicates, and applies the validator's
+   text rules to the planned `library.bib` and `main.typ`;
 3. current `library.bib`, `main.typ`, output catalog PDF, and optionally deleted
    sidecars are snapshotted;
 4. every requested `Library/<topic.path>/` is created, even for pending-only
@@ -925,23 +965,31 @@ An apply is transactional across every repeated `--manifest` argument:
    updates the parsed `file` value of its existing record;
 6. catalog headings with the same normalized identity are found, or the
    supplied naturally cased headings are created before the bibliography block;
+   an item for a topic that already has subtopics is placed before the first
+   subtopic heading, so it stays in its own topic;
 7. every title links to its individual entry in References; local items also receive a
    `[PDF]`, `[EPUB]`, or `[MOBI]` attachment link, albums and films with a
    `url` receive a separate `[URL]` link, and citation keys are inserted
    without visible pending-status labels;
 8. the quoted private `catalog-updated` value is set to the current local date;
 9. writes to the two text sources are atomic;
-10. `scripts/validate-library.sh` runs;
-11. Typst compiles a temporary catalog, which atomically replaces the requested
-   output only after success;
+10. `scripts/validate-library.sh --no-compile` checks the semantics, files,
+    and media;
+11. Typst compiles a temporary catalog once, which atomically replaces the
+    requested output only after success;
 12. explicitly selected sidecars are removed;
 13. a requested applied JSON report is written with owner-only permissions
     after validation and compilation have passed.
 
 If a move, write, validation, build, or cleanup step fails, the engine restores
 the snapshotted files, moves library files back, removes newly created empty
-directories, and reports the concrete error. Treat a rollback message as an
-incomplete intake and resolve the underlying cause before retrying.
+directories, and reports the concrete error. The same rollback runs when the
+apply is interrupted by Ctrl-C (`SIGINT`), `SIGTERM`, or `SIGHUP`; the command
+then exits with status 130. Further interrupts are ignored until the rollback
+finishes. Treat a rollback message as an incomplete intake and resolve the
+underlying cause before retrying. An abrupt `SIGKILL` or power loss cannot be
+rolled back; run `scripts/validate-library.sh` afterwards to find any
+half-applied state.
 
 The lock also covers dry runs, pending-status reads, and taxonomy reads. It
 waits five seconds by default; `--lock-timeout SECONDS` accepts a finite
@@ -995,7 +1043,12 @@ The exporter:
   entry types to RIS types;
 - preserves citation keys as `ID`, authors and editors, publication fields,
   DOI/URL values, and taxonomy keywords;
-- includes both local and pending records; and
+- writes a structured subtitle into the title as `title: subtitle`, and a
+  numbered series as `T3` with its number in `M1` for a book or `SV` for a
+  chapter, the tags Zotero reads as a series number (an article's `number`
+  stays its issue, `IS`);
+- includes both local and pending records, or only the subset selected by
+  the filters described below; and
 - omits every BibTeX `file` value so machine-specific attachment paths are not
   leaked or misinterpreted.
 
@@ -1013,6 +1066,45 @@ from the library root; absolute paths are also accepted:
 ```sh
 ./scripts/export-bibliography --output /tmp/paper-library.ris
 ```
+
+### Export a subset
+
+Three filters select records by kind and taxonomy:
+
+| Option | Selects | Example values |
+| --- | --- | --- |
+| `--type` | A kind of record: `paper`, `book`, `music` (or `album`), `film`; or an exact BibTeX entry type | `film`, `paper,book`, `online` |
+| `--topic` | A top-level topic with all of its subtopics | `QuantumChemistry`, `"Quantum Chemistry"` |
+| `--subtopic` | A topic path, or a subtopic name under any topic | `Film/Crime`, `ScienceFiction` |
+
+Kinds group BibTeX entry types. `book` covers books, chapters, collections,
+and proceedings volumes; `music` covers `@audio` and `@music`; `film` covers
+`@movie` and `@video`; `paper` covers every other document, including articles,
+conference papers, reports, theses, and online preprints. Use an exact entry
+type such as `article` or `online` when a kind is too broad.
+
+Repeat an option or separate its values with commas to match any of them.
+Records must match every option given. So `--type film --topic Film,Music`
+exports the films in either topic, while `--topic Film --subtopic
+ScienceFiction` exports only `Film/ScienceFiction`. Without the `--topic`, a
+bare subtopic name such as `ScienceFiction` also matches
+`Literature/ScienceFiction`. Topic names ignore case, spacing, and
+punctuation, like catalog headings.
+
+```sh
+./scripts/export-bibliography --type film --output exports/films.ris
+./scripts/export-bibliography --type paper --topic QuantumChemistry \
+  --output exports/quantum-chemistry-papers.ris
+./scripts/export-bibliography --subtopic Film/Crime,Literature/ScienceFiction \
+  --output exports/crime-and-science-fiction.ris
+```
+
+Give each subset its own `--output`, so a partial export is never mistaken for
+the full `exports/library.ris`. The summary reports how many records matched,
+for example `Exported 2 of 40 record(s) matching type film`. An unknown type,
+topic, or subtopic, or a combination that matches nothing, is reported as an
+error and nothing is written. The error lists the available top-level topics;
+`./scripts/intake-papers topics` lists every subtopic.
 
 In Zotero, use **File → Import → A file** and select either `library.bib` or the
 RIS export. In EndNote, import the RIS file with the **Reference Manager (RIS)**
@@ -1039,7 +1131,8 @@ It checks:
 
 - a structurally valid bibliography with unique, correctly formed keys, DOI
   values, and normalized titles (for albums and films, the title plus medium,
-  release year, and first creator);
+  release year, and first creator), except for records that a reviewed
+  `distinctfrom` field declares to be distinct works;
 - canonical, unique `musicbrainz`, `imdb`, and `wikidata` identifiers;
 - one title, author or editor, canonical date/year, topic marker, `keywords`,
   and `file` field per record;
@@ -1053,7 +1146,7 @@ It checks:
 - exactly one `[URL]` link to its safe HTTP(S) `url` for every album or film
   that has one, and no `[URL]` link on any other record;
 - canonical, safe, non-symlink paths rooted at `Library/` and an exact match
-  between bibliography paths and all on-disk PDF/EPUB/MOBI files;
+  between bibliography paths and the PDF/EPUB/MOBI files beneath `Library/`;
 - actual PDF, EPUB, and MOBI signatures/containers on every validation run;
 - unique file content by SHA-256;
 - exactly one `library.bib` selection in `main.typ`; and
@@ -1154,7 +1247,8 @@ access the first time Typst resolves them.
 ## Use an agent
 
 `AGENTS.md` is the authoritative repository policy for compatible coding
-agents. `CLAUDE.md` directs Claude Code to the same policy. The reusable intake
+agents. `CLAUDE.md` imports it through Claude Code's `@` file-import syntax, so
+both agents read one policy that cannot drift. The reusable intake
 skill lives at `skills/paper-library-intake/`; albums and films use
 `skills/music-film-intake/`, for example with "Use $music-film-intake to add
 this album with a listening link."
@@ -1204,8 +1298,9 @@ In a Git working tree, it audits:
 
 - tracked files;
 - unignored untracked files;
-- staged index blobs; and
-- every path/blob pairing reachable from existing Git history.
+- staged index blobs;
+- every path/blob pairing reachable from existing Git history; and
+- every reachable commit message and annotated tag message.
 
 It also checks the effective configured author/committer identities when Git
 can resolve them, plus every author/committer identity already reachable in
@@ -1221,6 +1316,13 @@ catalog author or last-updated value in `templates/main.typ`. Reachable commit
 author and committer emails must be provider no-reply addresses (the reserved
 `example.invalid` and `example.test` domains are accepted for synthetic tests),
 and the local username cannot be used as the Git display name.
+
+Commit and tag messages are published with history, so they get the same
+text scans and private terms. The one difference is that no-reply addresses,
+such as a `Co-Authored-By` trailer, are accepted in messages. The
+`.githooks/commit-msg` hook runs `./scripts/public-repo audit-message` on each
+new message before Git records it; comment lines and anything below a
+verbose-commit scissors line are ignored, because Git drops them too.
 
 It also rejects institutional proxy links: EZproxy and library-proxy hosts,
 OCLC and OpenAthens proxy services, N2S-style library proxy paths, and
@@ -1287,8 +1389,9 @@ git remote add origin YOUR_PUBLIC_REPOSITORY_URL
 git push -u origin main
 ```
 
-Choose and add a license before publishing. This template does not guess the
-owner's licensing decision.
+The framework is released under the MIT License in `LICENSE`. The license
+covers the public framework only; your private library records and media keep
+whatever terms apply to them and are never part of a public export.
 
 The exporter is not a history scrubber. If the audit reports a private
 historical blob, stop. Work from a backup and either reconstruct a clean
@@ -1330,6 +1433,7 @@ files.
 | `scripts/fetch-pending --key KEY --browser` | Open the record's publisher page in your browser | No |
 | `scripts/fetch-pending --match PATH... [--apply]` | Identify browser-downloaded PDFs and stage unique matches | Writes only ignored `Inbox/` with `--apply` |
 | `scripts/export-bibliography --output PATH --force` | Replace a selected RIS export | Replaces derived RIS output only |
+| `scripts/export-bibliography --type T --topic T --subtopic S --output PATH` | Export only matching records | Writes derived RIS output only |
 | `scripts/stage-papers PATH...` | Validate and print a plan to copy external media into `Inbox/` | No |
 | `scripts/stage-papers PATH... --apply` | Copy verified media into `Inbox/` while preserving originals | Adds private inbox copies |
 | `scripts/intake-papers --write-template PATH` | Write a starter JSON manifest | Writes only the requested new path |
@@ -1378,11 +1482,11 @@ apply transaction validates after inserting its record.
 
 ### `library files on disk and BibTeX file fields differ`
 
-Review the reported missing or uncataloged paths. A common cause is an unrelated
-PDF, EPUB, or MOBI file placed directly outside `Inbox/` and `Library/`, a
-manually moved canonical file, a stale `file` field, or an item omitted from the
-manifest. Staged files inside `Inbox/` are intentionally ignored by canonical
-orphan validation.
+Review the reported missing or uncataloged paths. A common cause is an
+unrelated PDF, EPUB, or MOBI file placed inside `Library/`, a manually moved
+canonical file, a stale `file` field, or an item omitted from the manifest.
+Media outside `Library/`, including staged files in `Inbox/`, is not checked
+here.
 
 ### `refusing to overwrite existing report without --force-report`
 
@@ -1395,6 +1499,11 @@ Do not work around the check by changing arbitrary metadata. Determine whether
 the incoming document is an existing item, a distinct version, a correction,
 or supplementary material. Only genuinely distinct documents belong as
 separate records.
+
+A shared title is reported with the matching citation keys. If verification
+shows a genuinely different work with the same title, add those keys to the
+item's `distinct_from` array (see the manifest reference) and rerun the dry
+run. Never use it to keep a second copy of the same work.
 
 ### PDF, EPUB, or MOBI format validation fails
 
@@ -1474,7 +1583,9 @@ The result should be `.githooks`.
 The library already has an album or film with that title, medium, year, and
 first creator. Check whether it is the same work before changing anything; for
 a genuinely different release, confirm its title, date, and credits against
-the sources rather than editing them to pass.
+the sources rather than editing them to pass. If the verified metadata really
+is identical for two different works, list the existing key in the item's
+`distinct_from` array.
 
 ### `lookup-media` reports HTTP 403, 429, or 503
 
@@ -1523,7 +1634,13 @@ Preserve these rules when extending the framework:
 - the catalog `[URL]` link derives only from an audio or video record's `url`,
   and those records stay pending until local audio and video are supported;
 - the shared `paperlib/` parser and media checks remain the single
-  interpretation used by intake, export, and validation;
+  interpretation used by intake, export, and validation, and the intake dry run
+  applies the validator's text checks to its planned state;
+- an apply rolls back on any error and on `SIGINT`, `SIGTERM`, or `SIGHUP`;
+- the validator treats only `Library/` as canonical media; duplicate-content
+  checks also cover `Inbox/`;
+- records may share a normalized identity only through a reviewed
+  `distinctfrom` assertion;
 - pending attachment changes only an existing empty `file` field and adds a
   bracketed catalog media link while retaining the References title link and
   holding the advisory lock;
@@ -1533,14 +1650,17 @@ Preserve these rules when extending the framework:
 - heading labels and path components retain the same normalized identity;
 - metadata provenance stays in optional private reports and never becomes
   canonical bibliography or catalog data;
-- `schemas/intake-manifest.schema.json` tracks the preferred manifest form;
+- `schemas/intake-manifest.schema.json` tracks the preferred manifest form,
+  and `tests/test_manifest_schema.py` keeps its properties and patterns in step
+  with the engine;
 - the RIS exporter remains offline, read-only with respect to canonical state,
   and excludes local `file` values;
 - root private files, `Inbox/`, `reports/`, and the entire `Library/` tree
   remain ignored;
 - new public files are added deliberately to the privacy allowlist;
 - changes to manifest behavior update the intake contract and this guide; and
-- changes to privacy behavior update this guide, `AGENTS.md`, and `CLAUDE.md`.
+- changes to privacy behavior update this guide and `AGENTS.md`, which
+  `CLAUDE.md` imports instead of repeating.
 
 After framework changes, run:
 

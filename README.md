@@ -1,48 +1,26 @@
 # Paper Library Template
 
-A Typst catalog for research papers and books. See
-[`docs/usage.md`](docs/usage.md) for the full guide and
-[`AGENTS.md`](AGENTS.md) for agent rules.
+A reusable Typst catalog for papers, books, albums, and films. See the
+[usage guide](docs/usage.md) or [agent rules](AGENTS.md).
 
-## Quick start
+## Setup
 
 ```sh
-./scripts/init-library    # creates private main.typ, library.bib, Library/
+./scripts/init-library
 ./scripts/install-hooks
 ```
 
-## Intake
+## Common commands
 
 ```sh
 ./scripts/stage-papers /path/to/document.pdf [--apply]
-./scripts/intake-papers --write-template /tmp/paper-intake.json
-./scripts/intake-papers topics --json
-./scripts/intake-papers --manifest /tmp/paper-intake.json [--apply]
-./scripts/intake-papers status --pending
-./scripts/fetch-pending --key author2026shorttitle [--apply] [--browser]
-./scripts/fetch-pending --match ~/Downloads [--apply]
-```
-
-Albums and films are pending records whose catalog entries link to a URL:
-
-```sh
-./scripts/lookup-media music "Album Title" --artist "Artist Name"
-./scripts/lookup-media film "Film Title" --year 2026
-./scripts/lookup-media music --id MUSICBRAINZ-RELEASE-GROUP-ID   # draft item
-```
-
-Manifests follow `schemas/intake-manifest.schema.json`.
-
-## Validate, export, publish
-
-```sh
+./scripts/intake-papers --manifest /tmp/intake.json [--apply]
 ./scripts/validate-library.sh
-typst compile main.typ Catalog.pdf
 ./scripts/test
-./scripts/export-bibliography    # private RIS for Zotero/EndNote
-./scripts/public-repo audit      # before every commit, push, or release
-./scripts/public-repo export /tmp/paper-library-template
+./scripts/export-bibliography
+./scripts/public-repo audit
 ```
 
-Private library data is Git-ignored and not backed up; keep a separate private
-or encrypted backup.
+Private library data and exports are Git-ignored; back them up separately.
+
+MIT licensed; see [LICENSE](LICENSE). Private records and media are excluded.

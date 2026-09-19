@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -26,6 +27,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from paperlib.bibtex import (  # noqa: E402
+    DISTINCT_FROM_FIELD,
     IDENTIFIER_FIELDS,
     BibEntry,
     BibtexError,
@@ -51,15 +53,17 @@ from paperlib.catalog import (  # noqa: E402
     parse_catalog,
 )
 from paperlib.media import (  # noqa: E402
+    INBOX_DIRECTORY,
+    LIBRARY_DIRECTORY,
     MediaError,
-    SUPPORTED_EXTENSIONS,
+    media_files,
     sha256,
     validate_media,
 )
+from paperlib.validation import check_sources  # noqa: E402
 
 
 KEY_RE = re.compile(r"^[a-z]+[0-9]{4}[a-z0-9]+$")
-LIBRARY_DIRECTORY = "Library"
 NAME_RE = re.compile(r"^[A-Z][A-Za-z0-9]*\.(?:epub|mobi|pdf)$")
 TOPIC_RE = re.compile(r"^[A-Z][A-Za-z0-9]*$")
 ENTRY_TYPE_RE = re.compile(r"^[A-Za-z]+$")
@@ -69,10 +73,84 @@ SAFE_HEADING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 &+()/.\-–]*$")
 CATALOG_UPDATED_RE = re.compile(
     r'^#let catalog-updated = "(?:\\.|[^"\\])*"\s*$', re.MULTILINE
 )
+# Manifest vocabulary; tests compare these sets with the public JSON schema.
+MANIFEST_PROPERTIES = frozenset({"$schema", "topic", "items"})
+LEGACY_MANIFEST_PROPERTIES = frozenset({"papers"})
+TOPIC_PROPERTIES = frozenset({"path", "headings"})
+NEW_ITEM_PROPERTIES = frozenset(
+    {
+        "attach",
+        "pending",
+        "source_file",
+        "canonical_filename",
+        "citation_key",
+        "entry_type",
+        "title",
+        "bib_title",
+        "fields",
+        "sidecars",
+        "metadata_sources",
+        "distinct_from",
+    }
+)
+LEGACY_ITEM_PROPERTIES = frozenset({"source_pdf"})
+ATTACHMENT_PROPERTIES = frozenset(
+    {
+        "attach",
+        "citation_key",
+        "source_file",
+        "canonical_filename",
+        "sidecars",
+        "metadata_sources",
+    }
+)
+RESERVED_FIELDS = frozenset({"title", "keywords", "file", DISTINCT_FROM_FIELD})
+# Exit status for an apply stopped by Ctrl-C or a termination signal.
+INTERRUPTED_EXIT_CODE = 130
 
 
 class IntakeError(RuntimeError):
     """A preflight or transactional intake failure."""
+
+
+class IntakeInterrupted(IntakeError):
+    """An interrupt or termination signal stopped an apply before it finished."""
+
+    def __init__(self, cause: str):
+        super().__init__(f"intake interrupted by {cause}; changes were rolled back")
+
+
+@contextmanager
+def interrupt_on_termination():
+    """Raise IntakeInterrupted on SIGTERM or SIGHUP so the rollback still runs."""
+
+    def interrupt(signal_number: int, _frame: Any) -> None:
+        raise IntakeInterrupted(signal.Signals(signal_number).name)
+
+    previous = {
+        number: signal.signal(number, interrupt)
+        for number in (signal.SIGTERM, signal.SIGHUP)
+    }
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
+@contextmanager
+def interrupts_ignored():
+    """Keep a second Ctrl-C or signal from abandoning a rollback halfway."""
+
+    previous = {
+        number: signal.signal(number, signal.SIG_IGN)
+        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    }
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
 
 
 @dataclass(frozen=True)
@@ -349,6 +427,12 @@ def update_catalog_date(main_text: str, value: str) -> str:
 
 
 def braces_are_balanced(value: str) -> bool:
+    """Return whether *value* can be written between braces and parsed back.
+
+    A final unpaired backslash would escape the closing brace, so it counts as
+    unbalanced.
+    """
+
     depth = 0
     escaped = False
     for character in value:
@@ -363,42 +447,25 @@ def braces_are_balanced(value: str) -> bool:
             depth -= 1
             if depth < 0:
                 return False
-    return depth == 0
+    return depth == 0 and not escaped
 
 
-def library_file_candidates(root: Path, output_path: Path) -> list[Path]:
+def library_file_candidates(root: Path) -> list[Path]:
+    """Return canonical and staged media for duplicate-content checks."""
+
     candidates: list[Path] = []
-    excluded_roots = {
-        ".github",
-        "docs",
-        "examples",
-        "paperlib",
-        "schemas",
-        "scripts",
-        "skills",
-        "templates",
-        "tests",
-    }
-    for candidate in root.rglob("*"):
-        if (
-            candidate.suffix.lower() not in SUPPORTED_EXTENSIONS
-            or not candidate.is_file()
-        ):
-            continue
-        resolved = candidate.resolve()
+    for directory in (LIBRARY_DIRECTORY, INBOX_DIRECTORY):
         try:
-            relative = resolved.relative_to(root)
-        except ValueError as error:
-            raise IntakeError(
-                f"library file leaves the root through a symlink: {candidate}"
-            ) from error
-        if resolved == output_path:
-            continue
-        if len(relative.parts) < 2:
-            continue
-        if relative.parts[0] in excluded_roots or relative.parts[0].startswith("."):
-            continue
-        candidates.append(resolved)
+            found = media_files(root, directory)
+        except MediaError as error:
+            raise IntakeError(str(error)) from error
+        for candidate in found:
+            if candidate.is_symlink():
+                raise IntakeError(
+                    "library media must not be a symlink: "
+                    f"{candidate.relative_to(root)}"
+                )
+            candidates.append(candidate)
     return candidates
 
 
@@ -413,20 +480,21 @@ class PlanState:
     existing_dois: set[str]
     existing_isbns: set[str]
     existing_identifiers: dict[str, set[str]]
-    existing_titles: set[str]
+    # Record identity -> citation keys that already share it.
+    existing_titles: dict[str, list[str]]
     new_keys: set[str] = field(default_factory=set)
     touched_keys: set[str] = field(default_factory=set)
     new_dois: set[str] = field(default_factory=set)
     new_isbns: set[str] = field(default_factory=set)
     new_identifiers: dict[str, set[str]] = field(default_factory=dict)
-    new_titles: set[str] = field(default_factory=set)
+    new_titles: dict[str, list[str]] = field(default_factory=dict)
     new_sources: set[Path] = field(default_factory=set)
     new_targets: set[Path] = field(default_factory=set)
     new_hashes: dict[str, Path] = field(default_factory=dict)
 
 
 def parse_topic(manifest: dict[str, Any]) -> tuple[str, tuple[str, ...], list[str]]:
-    unknown_root = set(manifest) - {"$schema", "topic", "items", "papers"}
+    unknown_root = set(manifest) - MANIFEST_PROPERTIES - LEGACY_MANIFEST_PROPERTIES
     if unknown_root:
         raise IntakeError(
             "manifest has unsupported top-level properties: "
@@ -437,7 +505,7 @@ def parse_topic(manifest: dict[str, Any]) -> tuple[str, tuple[str, ...], list[st
     topic = manifest.get("topic")
     if not isinstance(topic, dict):
         raise IntakeError("manifest.topic must be an object")
-    unknown_topic = set(topic) - {"path", "headings"}
+    unknown_topic = set(topic) - TOPIC_PROPERTIES
     if unknown_topic:
         raise IntakeError(
             "manifest.topic has unsupported properties: "
@@ -616,7 +684,9 @@ def parse_new_fields(
         raw_item.get("bib_title", display_title), f"{context}.bib_title"
     )
     if not braces_are_balanced(bib_title):
-        raise IntakeError(f"unbalanced braces in {context}.bib_title")
+        raise IntakeError(
+            f"unbalanced braces or a trailing backslash in {context}.bib_title"
+        )
     if title_identity(display_title) != title_identity(bib_title):
         raise IntakeError(
             f"{context}.bib_title must represent the same title as {context}.title"
@@ -625,10 +695,10 @@ def parse_new_fields(
     raw_fields = raw_item.get("fields")
     if not isinstance(raw_fields, dict):
         raise IntakeError(f"{context}.fields must be an object")
-    reserved = {"title", "keywords", "file"}
-    if any(str(name).casefold() in reserved for name in raw_fields):
+    if any(str(name).casefold() in RESERVED_FIELDS for name in raw_fields):
         raise IntakeError(
-            f"{context}.fields must not override title, keywords, or file"
+            f"{context}.fields must not override title, keywords, file, or "
+            f"{DISTINCT_FROM_FIELD}; use {context}.distinct_from for the latter"
         )
 
     fields: dict[str, str] = {}
@@ -646,7 +716,10 @@ def parse_new_fields(
             field_value, f"{context}.fields.{field_name}"
         )
         if not braces_are_balanced(normalized_value):
-            raise IntakeError(f"unbalanced braces in {context}.fields.{field_name}")
+            raise IntakeError(
+                "unbalanced braces or a trailing backslash in "
+                f"{context}.fields.{field_name}"
+            )
         fields[normalized_name] = normalized_value
 
     if not fields.get("author") and not fields.get("editor"):
@@ -704,24 +777,37 @@ def parse_new_fields(
     return display_title, bib_title, fields
 
 
+def parse_distinct_from(
+    raw_item: dict[str, Any], context: str, citation_key: str
+) -> list[str]:
+    """Return the reviewed keys of distinct works that share this identity."""
+
+    if "distinct_from" not in raw_item:
+        return []
+    raw_keys = raw_item["distinct_from"]
+    if not isinstance(raw_keys, list) or not raw_keys:
+        raise IntakeError(
+            f"{context}.distinct_from must be a non-empty array of citation keys"
+        )
+    keys: list[str] = []
+    for index, value in enumerate(raw_keys):
+        if not isinstance(value, str) or not KEY_RE.fullmatch(value.strip()):
+            raise IntakeError(
+                f"{context}.distinct_from[{index}] must be a citation key"
+            )
+        key = value.strip()
+        if key == citation_key:
+            raise IntakeError(f"{context}.distinct_from cannot list the record itself")
+        if key in keys:
+            raise IntakeError(f"duplicate {context}.distinct_from key: {key}")
+        keys.append(key)
+    return keys
+
+
 def build_new_plan(
     raw_item: dict[str, Any], context: str, state: PlanState
 ) -> ItemPlan:
-    allowed = {
-        "attach",
-        "pending",
-        "source_file",
-        "source_pdf",
-        "canonical_filename",
-        "citation_key",
-        "entry_type",
-        "title",
-        "bib_title",
-        "fields",
-        "sidecars",
-        "metadata_sources",
-    }
-    unknown = set(raw_item) - allowed
+    unknown = set(raw_item) - NEW_ITEM_PROPERTIES - LEGACY_ITEM_PROPERTIES
     if unknown:
         raise IntakeError(
             f"{context} has unsupported properties: " + ", ".join(sorted(unknown))
@@ -772,15 +858,33 @@ def build_new_plan(
         target_file,
         state.root,
     )
+    distinct_from = parse_distinct_from(raw_item, context, citation_key)
     identity = record_identity(entry_type, fields)
-    if identity in state.existing_titles or identity in state.new_titles:
-        if is_audiovisual(entry_type):
-            raise IntakeError(
-                "duplicate recording (same title, release year, and first "
-                f"creator): {display_title}"
-            )
-        raise IntakeError(f"duplicate normalized title: {display_title}")
-    state.new_titles.add(identity)
+    sharing = [
+        *state.existing_titles.get(identity, []),
+        *state.new_titles.get(identity, []),
+    ]
+    unrelated = [key for key in distinct_from if key not in sharing]
+    if unrelated:
+        raise IntakeError(
+            f"{context}.distinct_from names records that do not share this "
+            f"record's identity: {', '.join(unrelated)}"
+        )
+    unconfirmed = [key for key in sharing if key not in distinct_from]
+    if unconfirmed:
+        conflict = (
+            "duplicate recording (same title, release year, and first creator)"
+            if is_audiovisual(entry_type)
+            else "duplicate normalized title"
+        )
+        raise IntakeError(
+            f"{conflict}: {display_title} (matches {', '.join(unconfirmed)}); "
+            f"if it is a verified distinct work, list those keys in "
+            f"{context}.distinct_from"
+        )
+    state.new_titles.setdefault(identity, []).append(citation_key)
+    if distinct_from:
+        fields[DISTINCT_FROM_FIELD] = ", ".join(distinct_from)
 
     doi = fields.get("doi")
     if doi:
@@ -831,15 +935,7 @@ def build_new_plan(
 def build_attachment_plan(
     raw_item: dict[str, Any], context: str, state: PlanState
 ) -> ItemPlan:
-    allowed = {
-        "attach",
-        "citation_key",
-        "source_file",
-        "canonical_filename",
-        "sidecars",
-        "metadata_sources",
-    }
-    unknown = set(raw_item) - allowed
+    unknown = set(raw_item) - ATTACHMENT_PROPERTIES
     if unknown:
         raise IntakeError(
             f"{context} has unsupported attachment properties: "
@@ -911,7 +1007,6 @@ def parse_manifest(
     manifest: dict[str, Any],
     bib_text: str,
     main_text: str,
-    output_path: Path,
 ) -> tuple[str, list[str], list[ItemPlan]]:
     topic_path, topic_parts, headings = parse_topic(manifest)
     collection_key, raw_items = manifest_items(manifest)
@@ -929,6 +1024,11 @@ def parse_manifest(
         for entry in entries
         if entry.fields.get("file", "").strip()
     }
+    existing_titles: dict[str, list[str]] = {}
+    for entry in entries:
+        if entry.fields.get("title", "").strip():
+            identity = record_identity(entry.entry_type, entry.fields)
+            existing_titles.setdefault(identity, []).append(entry.citation_key)
     state = PlanState(
         root=root,
         topic_path=topic_path,
@@ -955,11 +1055,7 @@ def parse_manifest(
             }
             for name in IDENTIFIER_FIELDS
         },
-        existing_titles={
-            record_identity(entry.entry_type, entry.fields)
-            for entry in entries
-            if entry.fields.get("title", "").strip()
-        },
+        existing_titles=existing_titles,
     )
 
     plans: list[ItemPlan] = []
@@ -975,11 +1071,13 @@ def parse_manifest(
         else:
             plans.append(build_new_plan(raw_item, context, state))
 
+    if all(plan.digest is None for plan in plans):
+        return topic_path, headings, plans
     manifest_sources = {
         plan.source_file for plan in plans if plan.source_file is not None
     }
     existing_hashes: dict[str, Path] = {}
-    for candidate in library_file_candidates(root, output_path):
+    for candidate in library_file_candidates(root):
         if candidate in manifest_sources:
             continue
         existing_hashes.setdefault(sha256(candidate), candidate)
@@ -1166,7 +1264,16 @@ def insert_catalog_items(
         search_start = match_index + 1
         search_end = section_end
     else:
-        insertion_index = search_end
+        # Items placed after a subtopic heading would belong to that subtopic,
+        # so direct items go before the topic's first deeper heading.
+        insertion_index = next(
+            (
+                index
+                for index in range(search_start, search_end)
+                if HEADING_RE.fullmatch(lines[index].strip())
+            ),
+            search_end,
+        )
 
     payload: list[str] = []
     if insertion_index > 0 and lines[insertion_index - 1].strip():
@@ -1505,6 +1612,8 @@ def print_plan(
             url = catalog_url(plan)
             if url:
                 print(f"LINK  [URL] {url}")
+            if DISTINCT_FROM_FIELD in plan.fields:
+                print(f"DISTINCT FROM {plan.fields[DISTINCT_FROM_FIELD]}")
             for metadata_source in plan.metadata_sources:
                 print(f"META  {metadata_source}")
             for sidecar in plan.sidecars:
@@ -1574,87 +1683,119 @@ def apply_plan(
     temporary_output.unlink(missing_ok=True)
 
     try:
-        for topic in topic_plans:
-            created_directories.update(ensure_directory(topic.topic_directory, root))
-        for plan in plans:
-            if plan.pending:
-                continue
-            assert plan.source_file is not None
-            assert plan.target_file is not None
-            if plan.source_file == plan.target_file:
-                continue
-            created_directories.update(ensure_directory(plan.target_file.parent, root))
-            shutil.move(str(plan.source_file), str(plan.target_file))
-            moved.append((plan.source_file, plan.target_file))
-
-        atomic_write(bib_path, new_bib.encode("utf-8"), saved[bib_path].mode or 0o664)
-        atomic_write(
-            main_path, new_main.encode("utf-8"), saved[main_path].mode or 0o664
-        )
-
-        validator_command = (
-            [str(validator)]
-            if os.access(validator, os.X_OK)
-            else ["bash", str(validator)]
-        )
-        validation = subprocess.run(validator_command, cwd=root, check=False)
-        if validation.returncode != 0:
-            raise IntakeError("library validation failed; changes will be rolled back")
-
-        compilation = subprocess.run(
-            [typst, "compile", "main.typ", temporary_output.name], cwd=root, check=False
-        )
-        if compilation.returncode != 0:
-            raise IntakeError("catalog build failed; changes will be rolled back")
-        os.replace(temporary_output, output_path)
-
-        if delete_sidecars:
-            for sidecar in unique_sidecars:
-                sidecar.unlink()
-
-        if report_path is not None:
-            assert report_data is not None
-            try:
-                report_path.relative_to(root)
-            except ValueError:
-                pass
-            else:
-                created_directories.update(ensure_directory(report_path.parent, root))
-            atomic_write(report_path, report_data, 0o600)
-
-    except Exception as error:
-        for path, saved_path in saved.items():
-            try:
-                restore(path, saved_path)
-            except OSError as restore_error:
-                print(
-                    f"ROLLBACK ERROR restoring {path}: {restore_error}", file=sys.stderr
+        with interrupt_on_termination():
+            for topic in topic_plans:
+                created_directories.update(
+                    ensure_directory(topic.topic_directory, root)
                 )
-        for source, target in reversed(moved):
-            try:
-                if target.exists() and not source.exists():
-                    source.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(target), str(source))
-            except OSError as restore_error:
-                print(
-                    f"ROLLBACK ERROR restoring {source}: {restore_error}",
-                    file=sys.stderr,
+            for plan in plans:
+                if plan.pending:
+                    continue
+                assert plan.source_file is not None
+                assert plan.target_file is not None
+                if plan.source_file == plan.target_file:
+                    continue
+                created_directories.update(
+                    ensure_directory(plan.target_file.parent, root)
                 )
-        for directory in sorted(
-            created_directories, key=lambda path: len(path.parts), reverse=True
-        ):
-            try:
-                directory.rmdir()
-            except OSError:
-                pass
-        temporary_output.unlink(missing_ok=True)
+                # Record the move first; rollback skips one that never happened.
+                moved.append((plan.source_file, plan.target_file))
+                shutil.move(str(plan.source_file), str(plan.target_file))
+
+            atomic_write(
+                bib_path, new_bib.encode("utf-8"), saved[bib_path].mode or 0o664
+            )
+            atomic_write(
+                main_path, new_main.encode("utf-8"), saved[main_path].mode or 0o664
+            )
+
+            validator_command = (
+                [str(validator)]
+                if os.access(validator, os.X_OK)
+                else ["bash", str(validator)]
+            )
+            # The build below is the compile check, so validation skips its own.
+            validation = subprocess.run(
+                [*validator_command, "--no-compile"], cwd=root, check=False
+            )
+            if validation.returncode != 0:
+                raise IntakeError(
+                    "library validation failed; changes will be rolled back"
+                )
+
+            compilation = subprocess.run(
+                [typst, "compile", "main.typ", temporary_output.name],
+                cwd=root,
+                check=False,
+            )
+            if compilation.returncode != 0:
+                raise IntakeError("catalog build failed; changes will be rolled back")
+            os.replace(temporary_output, output_path)
+
+            if delete_sidecars:
+                for sidecar in unique_sidecars:
+                    sidecar.unlink()
+
+            if report_path is not None:
+                assert report_data is not None
+                try:
+                    report_path.relative_to(root)
+                except ValueError:
+                    pass
+                else:
+                    created_directories.update(
+                        ensure_directory(report_path.parent, root)
+                    )
+                atomic_write(report_path, report_data, 0o600)
+
+    # BaseException also covers Ctrl-C, which must not leave a half-applied intake.
+    except BaseException as error:
+        with interrupts_ignored():
+            roll_back(saved, moved, created_directories, temporary_output)
         if isinstance(error, IntakeError):
             raise
-        raise IntakeError(
-            f"intake failed and rollback was attempted: {error}"
-        ) from error
+        if isinstance(error, KeyboardInterrupt):
+            raise IntakeInterrupted("Ctrl-C (SIGINT)") from error
+        if isinstance(error, Exception):
+            raise IntakeError(
+                f"intake failed and rollback was attempted: {error}"
+            ) from error
+        raise
     finally:
         temporary_output.unlink(missing_ok=True)
+
+
+def roll_back(
+    saved: dict[Path, Snapshot],
+    moved: list[tuple[Path, Path]],
+    created_directories: set[Path],
+    temporary_output: Path,
+) -> None:
+    """Restore snapshots, move library files back, and remove new directories."""
+
+    for path, saved_path in saved.items():
+        try:
+            restore(path, saved_path)
+        except OSError as restore_error:
+            print(f"ROLLBACK ERROR restoring {path}: {restore_error}", file=sys.stderr)
+    for source, target in reversed(moved):
+        try:
+            if target.exists() and not source.exists():
+                source.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(target), str(source))
+        except OSError as restore_error:
+            print(
+                f"ROLLBACK ERROR restoring {source}: {restore_error}",
+                file=sys.stderr,
+            )
+    for directory in sorted(
+        created_directories, key=lambda path: len(path.parts), reverse=True
+    ):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    temporary_output.unlink(missing_ok=True)
 
 
 def pending_status(root: Path, *, as_json: bool) -> int:
@@ -1826,7 +1967,7 @@ def run_manifest(args: argparse.Namespace) -> int:
 
             try:
                 topic_path, headings, plans = parse_manifest(
-                    root, manifest, new_bib, new_main, output_path
+                    root, manifest, new_bib, new_main
                 )
             except IntakeError as error:
                 raise IntakeError(
@@ -1852,6 +1993,14 @@ def run_manifest(args: argparse.Namespace) -> int:
         catalog_updated = current_catalog_date()
         new_main = update_catalog_date(new_main, catalog_updated)
         preflight_batch_files(root, topic_plans)
+        # Apply the validator's text rules now, so the dry run fails wherever
+        # the post-apply validation would.
+        planned = check_sources(new_bib, new_main)
+        if planned.errors:
+            raise IntakeError(
+                "the planned library state would fail validation:\n"
+                + "\n".join(f"  - {error}" for error in planned.errors)
+            )
         plans = batch_items(topic_plans)
         protected_paths = {
             bib_path,
@@ -1942,6 +2091,12 @@ def main() -> int:
         if arguments[:1] == ["topics"]:
             return run_topics(arguments[1:])
         return run_manifest(parse_args())
+    except IntakeInterrupted as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return INTERRUPTED_EXIT_CODE
+    except KeyboardInterrupt:
+        print("ERROR: interrupted", file=sys.stderr)
+        return INTERRUPTED_EXIT_CODE
     except (BibtexError, CatalogError, IntakeError, MediaError, OSError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2

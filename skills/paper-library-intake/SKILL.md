@@ -43,7 +43,9 @@ they are not safe to infer mechanically.
    ISBN-13, and checks that identity for duplicates. A pending item omits
    `source_file` and `canonical_filename`; a local item requires both. Add
    optional `metadata_sources` HTTP(S) URLs to retain reviewed provenance in a
-   private report. Prefer a temporary manifest outside the library. Generate a
+   private report. If intake reports a shared normalized title and
+   authoritative sources show a genuinely different work, list the matching
+   keys in the item's `distinct_from` array; never use it for a second copy. Prefer a temporary manifest outside the library. Generate a
    starter when useful:
 
    ```sh
@@ -51,8 +53,10 @@ they are not safe to infer mechanically.
    ```
 
 6. Run a dry run and inspect every proposed move, source format, key, DOI,
-   ISBN, and destination. Repeat `--manifest` to preflight several topics as
-   one batch; every manifest must pass before anything can be applied:
+   ISBN, and destination. It also runs the validator's text checks on the
+   planned bibliography and catalog. Repeat `--manifest` to preflight several
+   topics as one batch; every manifest must pass before anything can be
+   applied:
 
    ```sh
    ./scripts/intake-papers \
@@ -121,8 +125,10 @@ documents. Keep `intake-papers` offline.
    page's standard `citation_pdf_url` is followed once.
 3. Sources are tried in this order: Unpaywall (only when
    `PAPER_LIBRARY_FETCH_EMAIL` is set at runtime; never store or print it),
-   anonymous OpenAlex open-access locations, Semantic Scholar open-access
-   copies, Crossref full-text links, arXiv preprints, and the DOI resolver.
+   Semantic Scholar open-access copies, Crossref full-text links, preprints
+   (arXiv from Semantic Scholar, then Crossref `has-preprint` links), and the
+   DOI resolver. OpenAlex is not used: it now requires an API key, and
+   Unpaywall serves the same open-access data.
    The helper does not use browser cookies, credentials, paywall bypasses, or
    authenticated scraping.
 4. For records that stay unavailable, add `--browser` (with `--apply`, only
@@ -136,8 +142,9 @@ documents. Keep `intake-papers` offline.
    `./scripts/fetch-pending --match <download-directory>`, then repeat with
    `--apply`. Only PDFs whose first pages uniquely match one pending record's
    DOI or title are copied to `Inbox/<citation-key>.pdf`; originals are
-   preserved. Ambiguous, duplicate, already staged, and text-less scanned PDFs
-   are reported for manual staging.
+   preserved. A title under four words also needs the first author's or
+   editor's family name. Ambiguous, duplicate, already staged, and text-less
+   scanned PDFs are reported for manual staging.
 6. Inspect every staged PDF, choose a reviewed canonical filename, and complete
    the ordinary `attach: true` manifest workflow. The fetcher intentionally
    does not edit `library.bib`, `main.typ`, or `Catalog.pdf`; the existing
@@ -166,8 +173,10 @@ documents. Keep `intake-papers` offline.
   secondary index only as a verified fallback.
 - When a user requests a Zotero/EndNote interchange file, use
   `scripts/export-bibliography` to derive private UTF-8 RIS metadata. Keep
-  `library.bib` canonical and do not add attachment paths to the export.
+  `library.bib` canonical and do not add attachment paths to the export. For a
+  subset, add `--type`, `--topic`, or `--subtopic` and a distinct `--output`.
 - Report each original filename, format, canonical path, citation key, metadata
   correction, new category, and retained or removed sidecar.
 - If the script rolls back or validation fails, leave the goal incomplete and
   report the concrete error; do not claim partial changes as successful intake.
+  An interrupted apply (exit status 130) has also been rolled back.

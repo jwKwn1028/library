@@ -32,13 +32,19 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from paperlib.bibtex import (  # noqa: E402
     BibtexError,
     is_audiovisual,
+    is_canonical_doi,
     normalize_doi,
     parse_bibliography,
     plain_text,
+    split_names,
     title_identity,
 )
 from paperlib.media import MediaError, sha256, validate_media  # noqa: E402
-from intake_papers import IntakeError, library_lock  # noqa: E402
+from intake_papers import (  # noqa: E402
+    INTERRUPTED_EXIT_CODE,
+    IntakeError,
+    library_lock,
+)
 from stage_papers import (  # noqa: E402
     StageError,
     StagePlan,
@@ -48,7 +54,6 @@ from stage_papers import (  # noqa: E402
 
 
 CROSSREF_API = "https://api.crossref.org/works/"
-OPENALEX_API = "https://api.openalex.org/works"
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/"
 UNPAYWALL_API = "https://api.unpaywall.org/v2/"
 DOI_HANDLE_API = "https://doi.org/api/handles/"
@@ -65,6 +70,10 @@ BROWSER_ENV = "PAPER_LIBRARY_BROWSER"
 ARXIV_ID_RE = re.compile(
     r"(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z]{2})?/\d{7})(?:v\d+)?", re.IGNORECASE
 )
+# arXiv registers DataCite DOIs of the form 10.48550/arXiv.<identifier>.
+ARXIV_DOI_RE = re.compile(r"^10\.48550/arxiv\.(.+)$", re.IGNORECASE)
+# Shorter titles are common phrases, so a title match also needs the creator.
+MIN_TITLE_ONLY_WORDS = 4
 MATCH_LEVELS = {3: "DOI", 2: "title", 1: "approximate title"}
 
 
@@ -315,7 +324,9 @@ def load_pending_records(root: Path) -> list[PendingRecord]:
                 citation_key=entry.citation_key,
                 title=plain_text(entry.fields.get("title", "")),
                 doi=normalize_doi(doi),
-                author=plain_text(entry.fields.get("author", "")),
+                # The raw BibTeX name list; editor-only books use their editors.
+                author=entry.fields.get("author", "").strip()
+                or entry.fields.get("editor", "").strip(),
                 topic=entry.topic or (),
             )
         )
@@ -367,9 +378,34 @@ def unpaywall_candidates(
     return candidates
 
 
+def preprint_candidate(id_type: str, identifier: str) -> Candidate | None:
+    """Return a PDF candidate for a preprint that Crossref links to a work."""
+
+    arxiv_id = ""
+    if id_type == "arxiv":
+        arxiv_id = re.sub(r"^arxiv:", "", identifier, flags=re.IGNORECASE)
+    elif id_type == "doi":
+        doi = normalize_doi(identifier)
+        arxiv_doi = ARXIV_DOI_RE.fullmatch(doi)
+        if arxiv_doi:
+            arxiv_id = arxiv_doi.group(1)
+        elif is_canonical_doi(doi):
+            # Most preprint servers declare citation_pdf_url on their landing page.
+            landing = f"https://doi.org/{quote(doi, safe='/')}"
+            return Candidate(f"Crossref preprint ({doi})", landing, landing)
+    if not ARXIV_ID_RE.fullmatch(arxiv_id):
+        return None
+    return Candidate(
+        f"arXiv ({arxiv_id})",
+        f"{ARXIV_PDF}{arxiv_id}",
+        f"https://arxiv.org/abs/{arxiv_id}",
+    )
+
+
 def crossref_candidates(
     record: PendingRecord, client: NetworkClient, email: str | None
-) -> list[Candidate]:
+) -> tuple[list[Candidate], list[Candidate]]:
+    """Return publisher full-text links and preprints registered with Crossref."""
     endpoint = f"{CROSSREF_API}{quote(record.doi, safe='')}"
     if email:
         endpoint += "?" + urlencode({"mailto": email})
@@ -377,13 +413,11 @@ def crossref_candidates(
     message = payload.get("message")
     if not isinstance(message, dict):
         raise FetchError("Crossref response has no work metadata")
-    links = message.get("link")
-    if not isinstance(links, list):
-        return []
 
-    candidates: list[Candidate] = []
+    full_text: list[Candidate] = []
     metadata_url = f"{CROSSREF_API}{quote(record.doi, safe='')}"
-    for link in links:
+    links = message.get("link")
+    for link in links if isinstance(links, list) else []:
         if not isinstance(link, dict):
             continue
         url = link.get("URL")
@@ -394,68 +428,21 @@ def crossref_candidates(
         source = "Crossref full text"
         if isinstance(version, str) and version:
             source += f" ({version})"
-        candidates.append(
-            Candidate(source, safe_web_url(url, "Crossref"), metadata_url)
-        )
-    return candidates
+        full_text.append(Candidate(source, safe_web_url(url, "Crossref"), metadata_url))
 
-
-def openalex_candidates(
-    record: PendingRecord, client: NetworkClient
-) -> list[Candidate]:
-    endpoint = (
-        OPENALEX_API
-        + "?"
-        + urlencode({"filter": f"doi:https://doi.org/{record.doi}", "per-page": "1"})
-    )
-    payload = client.json(endpoint, "OpenAlex")
-    results = payload.get("results")
-    if not isinstance(results, list) or not results or not isinstance(results[0], dict):
-        return []
-    work = results[0]
-    returned_doi = work.get("doi")
-    if (
-        not isinstance(returned_doi, str)
-        or normalize_doi(returned_doi).casefold() != record.doi.casefold()
-    ):
-        raise FetchError("OpenAlex returned a work with a different DOI")
-
-    locations: list[Any] = []
-    best = work.get("best_oa_location")
-    if isinstance(best, dict):
-        locations.append(best)
-    others = work.get("locations")
-    if isinstance(others, list):
-        locations.extend(others)
-
-    work_id = work.get("id")
-    metadata_url = (
-        work_id
-        if isinstance(work_id, str) and work_id.startswith("https://openalex.org/")
-        else "https://openalex.org"
-    )
-    candidates: list[Candidate] = []
-    for location in locations:
-        if not isinstance(location, dict) or location.get("is_oa") is not True:
+    preprints: list[Candidate] = []
+    relations = message.get("relation")
+    related = relations.get("has-preprint") if isinstance(relations, dict) else None
+    for relation in related if isinstance(related, list) else []:
+        if not isinstance(relation, dict):
             continue
-        url = location.get("pdf_url")
-        if not isinstance(url, str) or not url.strip():
-            continue
-        source_data = location.get("source")
-        source_name = (
-            source_data.get("display_name") if isinstance(source_data, dict) else None
+        candidate = preprint_candidate(
+            str(relation.get("id-type", "")).casefold(),
+            str(relation.get("id", "")).strip(),
         )
-        version = location.get("version")
-        details = [
-            value
-            for value in (version, source_name)
-            if isinstance(value, str) and value
-        ]
-        source = "OpenAlex OA" + (f" ({'; '.join(details)})" if details else "")
-        candidates.append(
-            Candidate(source, safe_web_url(url, "OpenAlex"), metadata_url)
-        )
-    return candidates
+        if candidate is not None:
+            preprints.append(candidate)
+    return full_text, preprints
 
 
 def semantic_scholar_candidates(
@@ -522,16 +509,14 @@ def discover_candidates(
         except FetchError as error:
             errors.append(f"Unpaywall: {error}")
     try:
-        candidates.extend(openalex_candidates(record, client))
-    except FetchError as error:
-        errors.append(f"OpenAlex: {error}")
-    try:
         open_access, preprints = semantic_scholar_candidates(record, client)
         candidates.extend(open_access)
     except FetchError as error:
         errors.append(f"Semantic Scholar: {error}")
     try:
-        candidates.extend(crossref_candidates(record, client, email))
+        full_text, registered_preprints = crossref_candidates(record, client, email)
+        candidates.extend(full_text)
+        preprints.extend(registered_preprints)
     except FetchError as error:
         errors.append(f"Crossref: {error}")
 
@@ -588,10 +573,36 @@ def normalized_words(value: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", ascii_value.casefold())
 
 
-def first_author_family(author: str) -> str:
-    first = author.split(" and ", 1)[0].strip()
-    family = first.split(",", 1)[0] if "," in first else first.split()[-1]
-    return "".join(normalized_words(family))
+def first_creator_family(creators: str) -> str:
+    """Return the first author's or editor's family name as normalized letters."""
+
+    first = split_names(creators)[0].strip()
+    if first.startswith("{") and first.endswith("}"):
+        family = first[1:-1]
+    elif "," in first:
+        family = first.split(",", 1)[0]
+    else:
+        parts = first.split()
+        family = parts[-1] if parts else ""
+    return "".join(normalized_words(plain_text(family)))
+
+
+def contains_word_run(words: list[str], target: str) -> bool:
+    """Return whether consecutive whole words spell *target*.
+
+    Whole words keep a short family name such as Li from matching inside
+    another word, and joining words still accepts spacing such as Le Cun.
+    """
+
+    for start in range(len(words)):
+        joined = ""
+        for word in words[start:]:
+            joined += word
+            if not target.startswith(joined):
+                break
+            if joined == target:
+                return True
+    return False
 
 
 def pdf_text(path: Path) -> str:
@@ -612,26 +623,35 @@ def pdf_text(path: Path) -> str:
 
 
 def identity_score(text: str, record: PendingRecord) -> tuple[int, float]:
-    """Rate first-page text as a DOI (3), title (2), approximate (1), or no match."""
+    """Rate first-page text as a DOI (3), title (2), approximate (1), or no match.
+
+    A title shorter than MIN_TITLE_ONLY_WORDS words is often a common phrase,
+    so its title match also needs the first creator's family name.
+    """
     compact_text = re.sub(r"\s+", "", text.casefold())
     doi = record.doi.casefold()
     # A trailing digit would mean a longer DOI that merely shares this prefix.
     if doi and re.search(re.escape(doi) + r"(?!\d)", compact_text):
         return 3, 1.0
+    text_words = normalized_words(text)
+    family = first_creator_family(record.author)
+    author_match = not family or contains_word_run(text_words, family)
+    expected_words = set(normalized_words(record.title))
     expected_identity = title_identity(record.title)
-    if expected_identity and expected_identity in title_identity(text):
+    long_title = len(expected_words) >= MIN_TITLE_ONLY_WORDS
+    if (
+        expected_identity
+        and expected_identity in title_identity(text)
+        and (long_title or (family and author_match))
+    ):
         return 2, 1.0
 
-    expected_words = set(normalized_words(record.title))
-    actual_words = set(normalized_words(text))
     coverage = (
-        len(expected_words & actual_words) / len(expected_words)
+        len(expected_words & set(text_words)) / len(expected_words)
         if expected_words
         else 0.0
     )
-    family = first_author_family(record.author) if record.author.strip() else ""
-    author_match = not family or family in "".join(normalized_words(text))
-    if len(expected_words) >= 4 and coverage >= 0.85 and author_match:
+    if long_title and coverage >= 0.85 and author_match:
         return 1, coverage
     return 0, coverage
 
@@ -1139,6 +1159,9 @@ def run(args: argparse.Namespace) -> int:
 def main() -> int:
     try:
         return run(parse_args())
+    except KeyboardInterrupt:
+        print("ERROR: interrupted; no partial Inbox files were left", file=sys.stderr)
+        return INTERRUPTED_EXIT_CODE
     except (FetchError, IntakeError, OSError, StageError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2

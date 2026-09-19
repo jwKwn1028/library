@@ -20,8 +20,34 @@ ISBN_SEPARATOR_RE = re.compile(r"[\s\-\u2010\u2011\u2012\u2013\u2014\u2212]")
 NAME_SEPARATOR_RE = re.compile(r"\s+and\s+")
 # Albums use @audio or @music; films use @movie or @video.
 AUDIO_ENTRY_TYPES = frozenset({"audio", "music"})
-AUDIOVISUAL_ENTRY_TYPES = AUDIO_ENTRY_TYPES | {"movie", "video"}
+VIDEO_ENTRY_TYPES = frozenset({"movie", "video"})
+AUDIOVISUAL_ENTRY_TYPES = AUDIO_ENTRY_TYPES | VIDEO_ENTRY_TYPES
+# BibLaTeX types for whole books, their parts, and edited or reference volumes.
+BOOK_ENTRY_TYPES = frozenset(
+    {
+        "book",
+        "bookinbook",
+        "booklet",
+        "collection",
+        "inbook",
+        "incollection",
+        "inreference",
+        "manual",
+        "mvbook",
+        "mvcollection",
+        "mvproceedings",
+        "mvreference",
+        "proceedings",
+        "reference",
+        "suppbook",
+        "suppcollection",
+    }
+)
+# Kinds of record, from most to least common in a research library.
+RECORD_KINDS = ("paper", "book", "music", "film")
 IDENTIFIER_FIELDS = ("imdb", "musicbrainz", "wikidata")
+# Citation keys of records verified as distinct works despite a shared identity.
+DISTINCT_FROM_FIELD = "distinctfrom"
 IDENTIFIER_PATTERNS = {
     "imdb": re.compile(r"^tt[0-9]{7,10}$"),
     "musicbrainz": re.compile(
@@ -274,6 +300,23 @@ def is_audiovisual(entry_type: str) -> bool:
     return entry_type.casefold() in AUDIOVISUAL_ENTRY_TYPES
 
 
+def record_kind(entry_type: str) -> str:
+    """Return whether an entry type is a paper, book, music, or film record.
+
+    Every document that is not book-like counts as a paper, including articles,
+    conference papers, reports, theses, and online preprints.
+    """
+
+    folded = entry_type.casefold()
+    if folded in AUDIO_ENTRY_TYPES:
+        return "music"
+    if folded in VIDEO_ENTRY_TYPES:
+        return "film"
+    if folded in BOOK_ENTRY_TYPES:
+        return "book"
+    return "paper"
+
+
 def normalize_identifier(name: str, value: str) -> str:
     """Reduce an IMDb, MusicBrainz, or Wikidata value or page URL to its ID."""
 
@@ -463,12 +506,24 @@ def record_identity(entry_type: str, fields: Mapping[str, str]) -> str:
     return f"{identity}|{medium}|{year}|{title_identity(creator)}"
 
 
-def catalog_title(fields: Mapping[str, str]) -> str:
-    """Return the plain-text title shown in the catalog topic list."""
+def key_list(value: str) -> list[str]:
+    """Split a comma-separated citation-key field such as ``distinctfrom``."""
+
+    return [key.strip() for key in value.split(",") if key.strip()]
+
+
+def work_title(fields: Mapping[str, str]) -> str:
+    """Return the plain-text ``title: subtitle`` of the work itself."""
 
     title = plain_text(fields.get("title", ""))
     subtitle = plain_text(fields.get("subtitle", ""))
-    work_title = f"{title}: {subtitle}" if subtitle else title
+    return f"{title}: {subtitle}" if subtitle else title
+
+
+def catalog_title(fields: Mapping[str, str]) -> str:
+    """Return the plain-text title shown in the catalog topic list."""
+
+    title = work_title(fields)
     series = plain_text(fields.get("series", ""))
     number = plain_text(fields.get("number", ""))
-    return f"{series} #{number}: {work_title}" if series and number else work_title
+    return f"{series} #{number}: {title}" if series and number else title

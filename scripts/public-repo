@@ -15,6 +15,7 @@ import sys
 PUBLIC_FILES = {
     Path(".github/workflows/ci.yml"),
     Path(".gitattributes"),
+    Path(".githooks/commit-msg"),
     Path(".githooks/pre-commit"),
     Path(".githooks/pre-push"),
     Path(".gitignore"),
@@ -67,6 +68,7 @@ PUBLIC_FILES = {
     Path("tests/test_fetch_pending.py"),
     Path("tests/test_intake_formats.py"),
     Path("tests/test_lookup_media.py"),
+    Path("tests/test_manifest_schema.py"),
     Path("tests/test_public_repo.py"),
     Path("tests/test_stage_papers.py"),
     Path("tests/test_validation.py"),
@@ -144,6 +146,10 @@ def parse_args() -> argparse.Namespace:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("audit", help="verify every publishable file")
+    message_parser = subparsers.add_parser(
+        "audit-message", help="check a commit message file before Git records it"
+    )
+    message_parser.add_argument("message_file", type=Path)
     export_parser = subparsers.add_parser(
         "export", help="copy only audited public files to an empty directory"
     )
@@ -482,6 +488,85 @@ def audit_git_history(
             check_public_data(relative, data, "Git history", patterns, errors)
 
 
+def message_findings(
+    data: bytes, patterns: list[tuple[str, re.Pattern[bytes]]]
+) -> list[str]:
+    """Return finding categories in a commit or tag message.
+
+    Public history may name no-reply addresses, such as a Co-Authored-By
+    trailer, so only other email addresses count.
+    """
+    findings: list[str] = []
+    for finding, pattern in patterns:
+        if finding == "email address":
+            if any(
+                not public_safe_identity_email(
+                    match.group(0).decode("utf-8", "replace")
+                )
+                for match in pattern.finditer(data)
+            ):
+                findings.append(finding)
+        elif pattern.search(data):
+            findings.append(finding)
+    if contains_institutional_proxy(data):
+        findings.append("institutional proxy URL")
+    return findings
+
+
+def audit_git_messages(
+    root: Path,
+    patterns: list[tuple[str, re.Pattern[bytes]]],
+    errors: list[str],
+) -> None:
+    """Check every reachable commit message and annotated tag message."""
+    commits = run_git(root, "log", "--all", "-z", "--format=%H%n%B")
+    if commits.returncode != 0:
+        detail = commits.stderr.decode("utf-8", errors="replace").strip()
+        raise PublicRepoError(f"could not inspect commit messages: {detail}")
+    for record in commits.stdout.split(b"\0"):
+        commit, _, message = record.strip(b"\n").partition(b"\n")
+        if not commit:
+            continue
+        label = commit[:12].decode("ascii", errors="strict")
+        for finding in message_findings(message, patterns):
+            errors.append(f"possible {finding} in commit message {label} (Git history)")
+
+    tags = run_git(
+        root,
+        "for-each-ref",
+        "--format=%(objecttype)%00%(refname:short)%00%(contents)%01",
+        "refs/tags",
+    )
+    if tags.returncode != 0:
+        detail = tags.stderr.decode("utf-8", errors="replace").strip()
+        raise PublicRepoError(f"could not inspect tag messages: {detail}")
+    for record in tags.stdout.split(b"\x01"):
+        parts = record.strip(b"\n").split(b"\0", 2)
+        # Lightweight tags show their commit's message, which is checked above.
+        if len(parts) != 3 or parts[0] != b"tag":
+            continue
+        label = parts[1].decode("utf-8", errors="replace")
+        for finding in message_findings(parts[2], patterns):
+            errors.append(f"possible {finding} in tag message {label} (Git history)")
+
+
+def audit_message(root: Path, path: Path) -> None:
+    """Reject a commit message that would publish private values."""
+    kept: list[bytes] = []
+    for line in path.read_bytes().splitlines(keepends=True):
+        if line.startswith(b"#"):
+            # Git drops comment lines, and everything below a verbose-commit
+            # scissors line, from the recorded message.
+            if b">8" in line:
+                break
+            continue
+        kept.append(line)
+    findings = message_findings(b"".join(kept), sensitive_patterns(root))
+    if findings:
+        formatted = "\n".join(f"  - possible {finding}" for finding in sorted(findings))
+        raise PublicRepoError(f"commit message failed the privacy audit:\n{formatted}")
+
+
 def audit_git_identities(root: Path, errors: list[str]) -> None:
     result = run_git(
         root,
@@ -560,6 +645,7 @@ def audit(root: Path, terms_root: Path | None = None) -> list[Path]:
     if is_git_repository(root):
         audit_git_index(root, patterns, errors)
         audit_git_history(root, patterns, errors)
+        audit_git_messages(root, patterns, errors)
         audit_git_identities(root, errors)
         audit_configured_git_identities(root, errors)
 
@@ -626,6 +712,8 @@ def main() -> int:
         if arguments.command == "audit":
             files = audit(root)
             print(f"OK: {len(files)} public files passed the privacy audit.")
+        elif arguments.command == "audit-message":
+            audit_message(root, arguments.message_file)
         else:
             export(root, arguments.destination)
     except (OSError, PublicRepoError, UnicodeError) as error:

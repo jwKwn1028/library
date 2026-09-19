@@ -80,11 +80,17 @@ def _plain_title(block: str, citation_key: str) -> str:
     return " ".join(prefix.split())
 
 
-def parse_catalog(text: str) -> list[CatalogItem]:
+def catalog_source(text: str) -> str:
+    """Return the catalog text before its #bibliography block."""
+
     bibliography = re.search(r"(?m)^#bibliography\s*\(", text)
     if not bibliography:
         raise CatalogError("main.typ has no #bibliography block")
-    source = text[: bibliography.start()]
+    return text[: bibliography.start()]
+
+
+def parse_catalog(text: str) -> list[CatalogItem]:
+    source = catalog_source(text)
     lines = source.splitlines(keepends=True)
     offsets: list[int] = []
     cursor = 0

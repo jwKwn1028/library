@@ -358,6 +358,69 @@ class SemanticValidationTests(unittest.TestCase):
 
         self.assertEqual(result.errors, ())
 
+    def test_media_outside_library_is_not_library_state(self) -> None:
+        for relative in ("notes/lecture-slides.pdf", "exports/preview.epub"):
+            stray = self.root / relative
+            stray.parent.mkdir(parents=True, exist_ok=True)
+            stray.write_bytes(b"not cataloged media")
+
+        result = self.validate()
+
+        self.assertEqual(result.errors, ())
+
+    def test_shared_titles_need_a_distinctfrom_assertion(self) -> None:
+        second = """
+@article{researcher2025handbook,
+  author       = {Researcher, Ben},
+  title        = {Synthetic Handbook},
+  journaltitle = {Journal of Synthetic Examples},
+  date         = {2025},
+  keywords     = {Literature, DigitalBooks},
+  file         = {}
+}
+"""
+        catalog = VALID_CATALOG.replace(
+            "#bibliography(",
+            "- #reference-title(<researcher2025handbook>)["
+            '#text("Synthetic Handbook")] #h(0pt) '
+            "@researcher2025handbook\n\n#bibliography(",
+        )
+        (self.root / "main.typ").write_text(catalog, encoding="utf-8")
+        cases = [
+            ("", ["duplicate normalized title: synthetichandbook"]),
+            ("  distinctfrom = {editor2024handbook},\n", []),
+            (
+                "  distinctfrom = {editor2024handbook, missing2020record},\n",
+                [
+                    "entry researcher2025handbook lists an unknown distinctfrom key: "
+                    "missing2020record"
+                ],
+            ),
+            (
+                "  distinctfrom = {researcher2025handbook},\n",
+                [
+                    "entry researcher2025handbook lists itself in distinctfrom",
+                    "duplicate normalized title: synthetichandbook "
+                    "(editor2024handbook, researcher2025handbook)",
+                ],
+            ),
+        ]
+        for assertion, expected in cases:
+            with self.subTest(assertion=assertion):
+                entry = second.replace("  keywords", f"{assertion}  keywords")
+                (self.root / "library.bib").write_text(
+                    VALID_BIBLIOGRAPHY + entry, encoding="utf-8"
+                )
+
+                errors = self.validate().errors
+
+                if not expected:
+                    self.assertEqual(errors, ())
+                for message in expected:
+                    self.assertTrue(
+                        any(error.startswith(message) for error in errors), errors
+                    )
+
     def write_recording(self, bibliography: str, item: str) -> None:
         catalog = VALID_CATALOG.replace(
             "= Literature\n\n== Digital Books",

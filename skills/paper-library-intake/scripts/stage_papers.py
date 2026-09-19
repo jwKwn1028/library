@@ -17,12 +17,18 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from paperlib.media import (  # noqa: E402
+    INBOX_DIRECTORY,
+    LIBRARY_DIRECTORY,
     MediaError,
-    SUPPORTED_EXTENSIONS,
+    media_files,
     sha256,
     validate_media,
 )
-from intake_papers import IntakeError, library_lock  # noqa: E402
+from intake_papers import (  # noqa: E402
+    INTERRUPTED_EXIT_CODE,
+    IntakeError,
+    library_lock,
+)
 
 
 class StageError(RuntimeError):
@@ -76,19 +82,15 @@ def source_path(value: Path) -> Path:
 
 def existing_media_hashes(root: Path) -> dict[str, Path]:
     hashes: dict[str, Path] = {}
-    for directory_name in ("Inbox", "Library"):
-        directory = root / directory_name
-        if directory.is_symlink():
-            raise StageError(f"private media root must not be a symlink: {directory}")
-        if not directory.is_dir():
-            continue
-        for candidate in directory.rglob("*"):
-            if candidate.suffix.casefold() not in SUPPORTED_EXTENSIONS:
-                continue
+    for directory_name in (INBOX_DIRECTORY, LIBRARY_DIRECTORY):
+        try:
+            candidates = media_files(root, directory_name)
+        except MediaError as error:
+            raise StageError(str(error)) from error
+        for candidate in candidates:
             if candidate.is_symlink():
                 raise StageError(f"existing media must not be a symlink: {candidate}")
-            if candidate.is_file():
-                hashes.setdefault(sha256(candidate), candidate)
+            hashes.setdefault(sha256(candidate), candidate)
     return hashes
 
 
@@ -162,7 +164,8 @@ def copy_plans(root: Path, plans: list[StagePlan]) -> None:
             created.append(plan.destination)
             temporary_path.unlink()
             temporary_paths.remove(temporary_path)
-    except Exception as error:
+    # BaseException also covers Ctrl-C, which must not leave partial copies.
+    except BaseException as error:
         for path in temporary_paths:
             path.unlink(missing_ok=True)
         for path in reversed(created):
@@ -172,6 +175,8 @@ def copy_plans(root: Path, plans: list[StagePlan]) -> None:
                 inbox.rmdir()
             except OSError:
                 pass
+        if not isinstance(error, Exception):
+            raise
         if isinstance(error, (MediaError, StageError)):
             raise StageError(str(error)) from error
         raise StageError(
@@ -196,6 +201,9 @@ def main() -> int:
             copy_plans(root, plans)
             print(f"\nStaged {len(plans)} file(s) in Inbox; originals were preserved.")
             return 0
+    except KeyboardInterrupt:
+        print("ERROR: interrupted; no partial Inbox copies were left", file=sys.stderr)
+        return INTERRUPTED_EXIT_CODE
     except (IntakeError, MediaError, OSError, StageError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2

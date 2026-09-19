@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
@@ -15,12 +16,18 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from paperlib.bibtex import (  # noqa: E402
+    AUDIOVISUAL_ENTRY_TYPES,
+    BOOK_ENTRY_TYPES,
+    RECORD_KINDS,
     BibEntry,
     BibtexError,
     parse_bibliography,
     plain_text,
+    record_kind,
     split_names,
+    work_title,
 )
+from paperlib.catalog import heading_component  # noqa: E402
 
 RIS_TYPES = {
     "article": "JOUR",
@@ -47,10 +54,50 @@ RIS_TYPES = {
     "unpublished": "UNPB",
     "video": "VIDEO",
 }
+# In BibLaTeX, number is an issue for serials but a series number otherwise.
+ISSUE_NUMBER_TYPES = {"article", "periodical"}
+# Zotero reads a book's series number from M1 and a chapter's from SV.
+SERIES_NUMBER_TAGS = {"BOOK": "M1", "CHAP": "SV"}
+# Accepted --type spellings for each kind of record.
+KIND_ALIASES = {
+    "paper": "paper",
+    "papers": "paper",
+    "book": "book",
+    "books": "book",
+    "music": "music",
+    "album": "music",
+    "albums": "music",
+    "film": "film",
+    "films": "film",
+}
 
 
 class ExportError(RuntimeError):
     """A bibliography parsing or export failure."""
+
+
+@dataclass(frozen=True)
+class RecordFilter:
+    """A record selection: values of one option match any, options match all."""
+
+    kinds: frozenset[str]
+    entry_types: frozenset[str]
+    topics: frozenset[str]
+    subtopics: tuple[tuple[str, ...], ...]
+    description: str
+
+    def matches(self, entry: BibEntry) -> bool:
+        if (self.kinds or self.entry_types) and not (
+            record_kind(entry.entry_type) in self.kinds
+            or entry.entry_type in self.entry_types
+        ):
+            return False
+        path = topic_path(entry)
+        if self.topics and (not path or path[0] not in self.topics):
+            return False
+        return not self.subtopics or any(
+            contains_subtopic(path, subtopic) for subtopic in self.subtopics
+        )
 
 
 def repository_root() -> Path:
@@ -81,7 +128,176 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="replace an existing output file",
     )
+    filters = parser.add_argument_group(
+        "record filters",
+        "Repeat an option, or separate values with commas, to match any of them. "
+        "Records must match every option given.",
+    )
+    filters.add_argument(
+        "--type",
+        dest="types",
+        action="append",
+        metavar="TYPE",
+        help=(
+            "paper, book, music (or album), or film, or an exact BibTeX entry "
+            "type such as article or online"
+        ),
+    )
+    filters.add_argument(
+        "--topic",
+        dest="topics",
+        action="append",
+        metavar="TOPIC",
+        help="top-level topic such as QuantumChemistry, with all of its subtopics",
+    )
+    filters.add_argument(
+        "--subtopic",
+        dest="subtopics",
+        action="append",
+        metavar="SUBTOPIC",
+        help=(
+            "topic path such as Film/Crime, or a subtopic name such as "
+            "ScienceFiction under any topic"
+        ),
+    )
     return parser.parse_args()
+
+
+def filter_values(values: list[str] | None) -> list[str]:
+    """Split repeated and comma-separated option values, keeping their order."""
+
+    return list(
+        dict.fromkeys(
+            part.strip()
+            for value in values or []
+            for part in value.split(",")
+            if part.strip()
+        )
+    )
+
+
+def topic_component(value: str) -> str:
+    """Normalize a topic as catalog headings do: no case, spaces, or punctuation."""
+
+    return heading_component(value).casefold()
+
+
+def entry_topic(entry: BibEntry) -> tuple[str, ...]:
+    return entry.topic or tuple(
+        part.strip()
+        for part in entry.fields.get("keywords", "").split(",")
+        if part.strip()
+    )
+
+
+def topic_path(entry: BibEntry) -> tuple[str, ...]:
+    return tuple(topic_component(part) for part in entry_topic(entry))
+
+
+def contains_subtopic(path: tuple[str, ...], subtopic: tuple[str, ...]) -> bool:
+    """Return whether *subtopic* is a run of *path* ending below the top level."""
+
+    size = len(subtopic)
+    return any(
+        path[start : start + size] == subtopic
+        for start in range(len(path) - size + 1)
+        if start + size >= 2
+    )
+
+
+def build_filter(
+    args: argparse.Namespace, entries: list[BibEntry]
+) -> RecordFilter | None:
+    """Validate the requested filters against the library's types and topics."""
+
+    types = filter_values(args.types)
+    topics = filter_values(args.topics)
+    subtopics = filter_values(args.subtopics)
+    if not (types or topics or subtopics):
+        return None
+
+    known_types = (
+        set(RIS_TYPES)
+        | BOOK_ENTRY_TYPES
+        | AUDIOVISUAL_ENTRY_TYPES
+        | {entry.entry_type for entry in entries}
+    )
+    kinds: set[str] = set()
+    entry_types: set[str] = set()
+    type_names: list[str] = []
+    for value in types:
+        folded = value.casefold()
+        if folded in KIND_ALIASES:
+            kinds.add(KIND_ALIASES[folded])
+            type_names.append(KIND_ALIASES[folded])
+        elif folded in known_types:
+            entry_types.add(folded)
+            type_names.append(folded)
+        else:
+            raise ExportError(
+                f"unknown record type: {value}; use {', '.join(RECORD_KINDS)}, "
+                "or a BibTeX entry type such as article"
+            )
+
+    top_level = {
+        topic_component(topic[0]): topic[0]
+        for topic in map(entry_topic, entries)
+        if topic
+    }
+    topic_keys: list[str] = []
+    for value in topics:
+        if "/" in value:
+            raise ExportError(
+                f"--topic takes one top-level topic; use --subtopic {value}"
+            )
+        key = topic_component(value)
+        if key not in top_level:
+            raise ExportError(
+                f"unknown topic: {value}; available topics: "
+                + ", ".join(sorted(top_level.values(), key=str.casefold))
+            )
+        topic_keys.append(key)
+
+    paths = {topic_path(entry) for entry in entries}
+    # Canonical spellings let the summary echo topics as the catalog names them.
+    names = {
+        topic_component(part): part
+        for topic in map(entry_topic, entries)
+        for part in topic
+    }
+    subtopic_paths: list[tuple[str, ...]] = []
+    for value in subtopics:
+        subtopic = tuple(topic_component(part) for part in value.split("/"))
+        if not all(subtopic):
+            raise ExportError(f"invalid subtopic: {value}")
+        if not any(contains_subtopic(path, subtopic) for path in paths):
+            hint = (
+                "; it is a top-level topic, so use --topic"
+                if len(subtopic) == 1 and subtopic[0] in top_level
+                else "; list subtopics with scripts/intake-papers topics"
+            )
+            raise ExportError(f"unknown subtopic: {value}{hint}")
+        subtopic_paths.append(subtopic)
+
+    description = "; ".join(
+        f"{label} {', '.join(dict.fromkeys(values))}"
+        for label, values in (
+            ("type", type_names),
+            ("topic", [top_level[key] for key in topic_keys]),
+            (
+                "subtopic",
+                ["/".join(names[part] for part in path) for path in subtopic_paths],
+            ),
+        )
+        if values
+    )
+    return RecordFilter(
+        frozenset(kinds),
+        frozenset(entry_types),
+        frozenset(topic_keys),
+        tuple(subtopic_paths),
+        description,
+    )
 
 
 def split_top_level(value: str, separator: str) -> list[str]:
@@ -121,7 +337,8 @@ def add_line(lines: list[str], tag: str, value: str | None) -> None:
 
 def render_entry(entry: BibEntry) -> list[str]:
     fields = entry.fields
-    lines = [f"TY  - {RIS_TYPES.get(entry.entry_type, 'GEN')}"]
+    ris_type = RIS_TYPES.get(entry.entry_type, "GEN")
+    lines = [f"TY  - {ris_type}"]
     add_line(lines, "ID", entry.citation_key)
 
     for author in split_names(fields.get("author", "")):
@@ -129,7 +346,7 @@ def render_entry(entry: BibEntry) -> list[str]:
     for editor in split_names(fields.get("editor", "")):
         add_line(lines, "ED", plain_text(editor))
 
-    add_line(lines, "TI", plain_text(fields.get("title", "")))
+    add_line(lines, "TI", work_title(fields))
     add_line(
         lines,
         "JF",
@@ -145,10 +362,14 @@ def render_entry(entry: BibEntry) -> list[str]:
         add_line(lines, "DA", "/".join(part for part in date_match.groups() if part))
 
     add_line(lines, "VL", plain_text(fields.get("volume", ""), typography=False))
+    number = plain_text(fields.get("number", ""), typography=False)
+    if number and entry.entry_type not in ISSUE_NUMBER_TYPES and fields.get("series"):
+        add_line(lines, SERIES_NUMBER_TAGS.get(ris_type, "M1"), number)
+        number = ""
     add_line(
         lines,
         "IS",
-        plain_text(fields.get("number", fields.get("issue", "")), typography=False),
+        number or plain_text(fields.get("issue", ""), typography=False),
     )
 
     pages = plain_text(fields.get("pages", ""), typography=False)
@@ -257,14 +478,31 @@ def main() -> int:
         except (OSError, UnicodeError) as error:
             raise ExportError(f"cannot read {source}: {error}") from error
         entries = parse_bibliography(bibliography)
-        write_output(output, render_ris(entries), args.force)
+        record_filter = build_filter(args, entries)
+        selected = (
+            entries
+            if record_filter is None
+            else [entry for entry in entries if record_filter.matches(entry)]
+        )
+        if not selected:
+            assert record_filter is not None
+            raise ExportError(
+                f"no records match {record_filter.description}; nothing was written"
+            )
+        write_output(output, render_ris(selected), args.force)
 
         try:
             display_output = output.relative_to(root)
         except ValueError:
             display_output = output
+        scope = (
+            f"{len(entries)} record(s)"
+            if record_filter is None
+            else f"{len(selected)} of {len(entries)} record(s) matching "
+            f"{record_filter.description}"
+        )
         print(
-            f"Exported {len(entries)} record(s) to {display_output} "
+            f"Exported {scope} to {display_output} "
             "(UTF-8 RIS; local file paths omitted)."
         )
         return 0

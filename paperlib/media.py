@@ -10,10 +10,33 @@ import zipfile
 
 
 SUPPORTED_EXTENSIONS = {".epub", ".mobi", ".pdf"}
+# Canonical media lives under Library/; Inbox/ is the private staging area.
+LIBRARY_DIRECTORY = "Library"
+INBOX_DIRECTORY = "Inbox"
 
 
 class MediaError(RuntimeError):
     """A document is missing, unsafe, or does not match its extension."""
+
+
+def media_files(root: Path, directory: str) -> list[Path]:
+    """Return supported media beneath one top-level private media directory.
+
+    Symlinked directories are not followed. A symlinked media file is returned
+    so each caller can reject it with its own context.
+    """
+
+    base = root / directory
+    if base.is_symlink():
+        raise MediaError(f"private media root must not be a symlink: {directory}")
+    if not base.is_dir():
+        return []
+    return sorted(
+        candidate
+        for candidate in base.rglob("*")
+        if candidate.suffix.casefold() in SUPPORTED_EXTENSIONS
+        and (candidate.is_symlink() or candidate.is_file())
+    )
 
 
 def sha256(path: Path) -> str:

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 
@@ -13,6 +14,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 STAGE_ENGINE = (
     REPOSITORY_ROOT / "skills" / "paper-library-intake" / "scripts" / "stage_papers.py"
 )
+if str(STAGE_ENGINE.parent) not in sys.path:
+    sys.path.insert(0, str(STAGE_ENGINE.parent))
+
+import stage_papers  # noqa: E402
 
 
 class StagePapersTests(unittest.TestCase):
@@ -101,6 +106,28 @@ class StagePapersTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("library is busy", result.stderr)
+        self.assertFalse((self.root / "Inbox").exists())
+
+    def test_interrupted_copy_leaves_no_partial_inbox_files(self) -> None:
+        plans = []
+        for name in ("first.epub", "second.epub"):
+            source = self.external / name
+            self.write_epub(source, name)
+            plans.append(
+                stage_papers.StagePlan(
+                    source, self.root / "Inbox" / name, stage_papers.sha256(source)
+                )
+            )
+
+        # The second copy is interrupted after the first has been published.
+        with (
+            mock.patch.object(
+                stage_papers, "validate_media", side_effect=[None, KeyboardInterrupt]
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            stage_papers.copy_plans(self.root, plans)
+
         self.assertFalse((self.root / "Inbox").exists())
 
     def test_rejects_a_symlinked_inbox(self) -> None:

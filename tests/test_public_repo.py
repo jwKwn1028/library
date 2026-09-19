@@ -212,6 +212,80 @@ class PublicRepositoryAuditTests(unittest.TestCase):
         self.assertNotIn("synthetic institute", result.stderr.casefold())
         self.assertNotIn(".paper-library-private-terms (working tree)", result.stderr)
 
+    def test_rejects_private_values_in_history_messages_without_echoing_them(
+        self,
+    ) -> None:
+        readme = self.root / "README.md"
+        readme.write_text("Synthetic template.\n", encoding="utf-8")
+        trailer = (
+            "Co-Authored-By: Synthetic Agent <agent" + chr(64) + "noreply.example.test>"
+        )
+        self.commit(f"add synthetic readme\n\n{trailer}")
+        allowed = self.audit()
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+        # Split literals keep this test file from matching the real audit.
+        leaked_email = "reader" + chr(64) + "university.xx"
+        leaked_path = "/ho" + "me/reader/Downloads"
+        readme.write_text("Synthetic template, revised.\n", encoding="utf-8")
+        self.commit(f"import from {leaked_path} for {leaked_email}")
+        self.git("tag", "-a", "v1", "-m", f"release for {leaked_email}")
+
+        result = self.audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("possible email address in commit message", result.stderr)
+        self.assertIn(
+            "possible absolute home-directory path in commit message", result.stderr
+        )
+        self.assertIn("possible email address in tag message v1", result.stderr)
+        self.assertNotIn("university.xx", result.stderr)
+        self.assertNotIn("Downloads", result.stderr)
+
+    def test_audit_message_checks_the_message_git_will_record(self) -> None:
+        (self.root / ".paper-library-private-terms").write_text(
+            "Synthetic Institute\n", encoding="utf-8"
+        )
+        message = self.root / ".git/COMMIT_EDITMSG"
+        leaked_email = "reader" + chr(64) + "university.xx"
+
+        def audit_message(text: str) -> subprocess.CompletedProcess[str]:
+            message.write_text(text, encoding="utf-8")
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(self.root / "scripts/public-repo"),
+                    "audit-message",
+                    str(message),
+                ],
+                cwd=self.root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        accepted = audit_message(
+            "fix: synthetic change\n\n"
+            "Co-Authored-By: Synthetic Agent <agent"
+            + chr(64)
+            + "noreply.example.test>\n"
+            "# Lines starting with '#' are not recorded.\n"
+            "# ------------------------ >8 ------------------------\n"
+            f"-removed contact {leaked_email}\n"
+        )
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+        rejected = audit_message(
+            f"fix: thanks to the synthetic institute and {leaked_email}\n"
+        )
+        self.assertEqual(rejected.returncode, 1)
+        self.assertIn("commit message failed the privacy audit", rejected.stderr)
+        self.assertIn("possible email address", rejected.stderr)
+        self.assertIn("possible private term", rejected.stderr)
+        self.assertNotIn("university.xx", rejected.stderr)
+        self.assertNotIn("synthetic institute", rejected.stderr.casefold())
+
     def test_rejects_a_private_term_too_short_to_be_meaningful(self) -> None:
         (self.root / ".paper-library-private-terms").write_text(
             "ab\n", encoding="utf-8"

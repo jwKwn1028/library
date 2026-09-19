@@ -9,14 +9,15 @@ Read this reference before constructing an intake manifest.
   conflict.
 - Classify by the item's primary contribution in the narrowest clean existing
   directory. Prefer domain-specific folders over generic ones. Never file a
-  book, film, or album under `Perspectives`, the catch-all for adjacent
+  book, film, or album under `AdjacentFields`, the catch-all for adjacent
   research; a book belongs under its subject topic or `Literature`.
 - Create a category only when no existing directory fits, the topic is broader
   than one item, and it is likely to recur or already has a peer item. Use a
   concise PascalCase topic name and mention the new category in the report.
 - Check likely duplicates by DOI, citation key, title, and file content. Do not
   retain a second copy unless it is a meaningfully different document such as a
-  supplement.
+  supplement. A genuinely different work that shares a normalized title with
+  an existing record needs a reviewed `distinct_from` list (see below).
 
 ## Canonical names and keys
 
@@ -64,7 +65,9 @@ fail before any library state changes.
 The preferred `items` form is described by
 [`schemas/intake-manifest.schema.json`](../../../schemas/intake-manifest.schema.json).
 The engine remains the final validator and additionally checks the live
-bibliography, catalog, filesystem, and media contents.
+bibliography, catalog, filesystem, and media contents. Its dry run also applies
+the validator's text rules to the planned `library.bib` and `main.typ`, so a
+plan that validation would reject fails before any change.
 
 ```json
 {
@@ -202,9 +205,19 @@ Rules:
   credential-free HTTP(S) URL and becomes a separate `[URL]` catalog link;
   other entry types never receive one. Their duplicate identity is the
   normalized catalog title plus medium, release year, and first creator.
-- `keywords` and `file` are generated; do not put them in `fields`. A
-  local item receives `Library/<topic.path>/<canonical_filename>`, while a
-  pending item receives an empty `file` value.
+- A record whose normalized identity (catalog title, or the audiovisual
+  identity above) matches another record is rejected with the matching keys.
+  When authoritative sources show a genuinely different work, add
+  `"distinct_from": ["matchingkey"]` to the new item, naming every match and
+  nothing else. The engine stores it as a `distinctfrom` BibTeX field, which
+  validation requires for every same-identity pair. Never use it to keep a
+  second copy of the same item.
+- `keywords` and `file` are generated, and `distinctfrom` comes only from
+  `distinct_from`; do not put any of them in `fields`. A local item receives
+  `Library/<topic.path>/<canonical_filename>`, while a pending item receives an
+  empty `file` value.
+- Field values must have balanced braces and cannot end in an unpaired
+  backslash, which would escape the closing brace.
 - `sidecars` are informational unless `--delete-sidecars` is explicitly used.
   The script never treats downloaded sidecar metadata as authoritative.
 - `metadata_sources` is an optional array of unique HTTP(S) URLs used to verify
@@ -218,6 +231,11 @@ Rules:
   concurrent operation fails after the finite `--lock-timeout` instead of
   losing an update. Run `scripts/intake-papers topics --json` before
   classification to discover current paths, readable headings, and counts.
+- An item may target a topic that already has subtopics; it is inserted before
+  the first subtopic heading.
+- An apply that fails, or is interrupted by Ctrl-C, `SIGTERM`, or `SIGHUP`,
+  restores the snapshotted sources, moves files back, and removes new empty
+  directories. An interrupted apply exits with status 130.
 
 ## External staging and provenance reports
 
@@ -226,16 +244,20 @@ repository. Its default mode is a dry run; `--apply` copies verified PDF, EPUB,
 or MOBI files into the ignored `Inbox/` without changing the originals. It
 rejects symlinks, invalid media, filename collisions, and duplicate content in
 the batch, `Inbox/`, or `Library/`. It uses the same advisory lock as intake.
-`Inbox/` is a staging area and is excluded from canonical orphan validation,
-but its files still participate in intake and staging duplicate checks.
+Validation scans only `Library/` for canonical media, so `Inbox/` staging and
+media elsewhere in the root are not library state; intake, staging, and
+`fetch-pending --match` still check `Library/` and `Inbox/` for duplicate
+content.
 
 For a user-requested DOI-backed pending download, run
 `scripts/fetch-pending --key <citation-key>` before its `--apply` form. The
-networked helper may retrieve accessible candidates from Unpaywall, anonymous
-OpenAlex open-access locations, Semantic Scholar open-access copies, Crossref
-full-text metadata, arXiv preprints, or the DOI resolver, following a landing
-page's `citation_pdf_url` at most once, but writes only verified PDFs beneath
-`Inbox/`. Set `PAPER_LIBRARY_FETCH_EMAIL` at runtime to enable Unpaywall and
+networked helper may retrieve accessible candidates from Unpaywall,
+Semantic Scholar open-access copies, Crossref full-text links, preprints
+(arXiv, and Crossref `has-preprint` links), or the DOI resolver, following a
+landing page's `citation_pdf_url` at most once, but writes only verified PDFs
+beneath `Inbox/`. OpenAlex is not queried; it requires an API key, and
+Unpaywall serves the same open-access data. A title under four words must also
+match the first creator's family name. Set `PAPER_LIBRARY_FETCH_EMAIL` at runtime to enable Unpaywall and
 never record that value. Treat unavailable, authenticated, HTML, oversized, or
 identity-mismatched responses as unresolved; do not bypass access controls.
 `--browser` opens unresolved records' publisher pages in the user's browser,
@@ -264,8 +286,10 @@ PDF, EPUB, or MOBI file beneath `Library/`, a title linked to its bibliography
 entry, and a separate `[PDF]`, `[EPUB]`, or `[MOBI]` attachment link. A pending item has an
 empty `file` field, a title linked to its individual bibliography entry
 with no visible status label, and an empty `Library/<topic.path>/` destination
-directory. No placeholder media file is created. No DOI, ISBN, key, normalized
-catalog title, non-empty file path, or local file content is duplicated. The validator passes and
+directory. No placeholder media file is created. No DOI, ISBN, key, non-empty
+file path, or local file content is duplicated, and a normalized catalog title
+is shared only by records with a reviewed `distinctfrom` assertion. The
+validator passes and
 `Catalog.pdf` is rebuilt in the library root. The private
 `catalog-updated` value records the successful intake's local calendar date; a
 dry run or rollback does not change it.

@@ -48,7 +48,7 @@ field conventions, source priority, and synthetic manifest examples.
    the user names other topics, use the top-level `Music` and `Film` topics and
    subdivide them by genre, tradition, or movement (for example `Music/Jazz` or
    `Film/ScienceFiction`), following the naming rules in `AGENTS.md`. Never
-   file an album or film under `Perspectives`, the catch-all for adjacent
+   file an album or film under `AdjacentFields`, the catch-all for adjacent
    research.
 3. Find the work with the read-only lookup helper:
 

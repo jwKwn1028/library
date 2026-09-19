@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from itertools import combinations
 from pathlib import Path
 import re
 import shutil
@@ -13,7 +14,9 @@ import sys
 import tempfile
 
 from paperlib.bibtex import (
+    DISTINCT_FROM_FIELD,
     IDENTIFIER_FIELDS,
+    BibEntry,
     BibtexError,
     catalog_title,
     is_audiovisual,
@@ -22,6 +25,7 @@ from paperlib.bibtex import (
     is_canonical_identifier,
     is_safe_web_url,
     is_valid_isbn,
+    key_list,
     normalize_doi,
     normalize_identifier,
     normalize_isbn,
@@ -29,25 +33,25 @@ from paperlib.bibtex import (
     record_identity,
     title_identity,
 )
-from paperlib.catalog import CITATION_RE, CatalogError, heading_component, parse_catalog
-from paperlib.media import MediaError, SUPPORTED_EXTENSIONS, sha256, validate_media
+from paperlib.catalog import (
+    CITATION_RE,
+    CatalogError,
+    catalog_source,
+    heading_component,
+    parse_catalog,
+)
+from paperlib.media import (
+    LIBRARY_DIRECTORY,
+    MediaError,
+    media_files,
+    sha256,
+    validate_media,
+)
 
 
 KEY_RE = re.compile(r"^[a-z]+[0-9]{4}[a-z0-9]+$")
 TOPIC_RE = re.compile(r"^[A-Z][A-Za-z0-9]*$")
 NAME_RE = re.compile(r"^[A-Z][A-Za-z0-9]*\.(?:epub|mobi|pdf)$")
-EXCLUDED_MEDIA_ROOTS = {
-    ".github",
-    "Inbox",
-    "docs",
-    "examples",
-    "paperlib",
-    "schemas",
-    "scripts",
-    "skills",
-    "templates",
-    "tests",
-}
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,17 @@ class ValidationResult:
     files: int
     pending: int
     errors: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SourceCheck:
+    """The text-only result for one library.bib and main.typ pair."""
+
+    entries: tuple[BibEntry, ...]
+    local_paths: tuple[str, ...]
+    pending: int
+    errors: tuple[str, ...]
+    complete: bool
 
 
 def _duplicates(values: list[str]) -> list[str]:
@@ -83,56 +98,41 @@ def _safe_local_path(root: Path, value: str) -> tuple[Path | None, str | None]:
 
 
 def _disk_media(root: Path) -> tuple[list[str], list[str]]:
+    """Return canonical media under Library/; other directories are not scanned."""
+
+    try:
+        candidates = media_files(root, LIBRARY_DIRECTORY)
+    except MediaError as error:
+        return [], [str(error)]
     paths: list[str] = []
     errors: list[str] = []
-    for candidate in root.rglob("*"):
-        if candidate.suffix.casefold() not in SUPPORTED_EXTENSIONS:
-            continue
-        relative = candidate.relative_to(root)
-        if len(relative.parts) < 2:
-            continue
-        first = relative.parts[0]
-        if first.startswith(".") or first in EXCLUDED_MEDIA_ROOTS:
-            continue
+    for candidate in candidates:
+        relative = candidate.relative_to(root).as_posix()
         if candidate.is_symlink():
-            errors.append(f"library media path is a symlink: {relative.as_posix()}")
-        elif not candidate.is_file():
-            continue
-        paths.append(relative.as_posix())
-    return sorted(paths), errors
+            errors.append(f"library media path is a symlink: {relative}")
+        paths.append(relative)
+    return paths, errors
 
 
-def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationResult:
-    root = root.expanduser().resolve()
-    errors: list[str] = []
-    bib_path = root / "library.bib"
-    main_path = root / "main.typ"
-    title_link_style_path = root / "styles/title-link.csl"
-    if not bib_path.is_file():
-        errors.append("missing bibliography: library.bib")
-    if not main_path.is_file():
-        errors.append("missing catalog source: main.typ")
-    if not title_link_style_path.is_file():
-        errors.append("missing catalog title-link style: styles/title-link.csl")
-    if errors:
-        return ValidationResult(0, 0, 0, tuple(errors))
+def check_sources(bib_text: str, main_text: str) -> SourceCheck:
+    """Check bibliography and catalog semantics without reading the disk.
+
+    The intake engine runs these same checks on its planned text during a dry
+    run, so a dry run and an apply agree on every text-level rule.
+    """
 
     try:
-        bib_text = bib_path.read_text(encoding="utf-8")
         entries = parse_bibliography(bib_text)
-    except (OSError, UnicodeError, BibtexError) as error:
-        return ValidationResult(0, 0, 0, (f"cannot parse library.bib: {error}",))
-    try:
-        main_text = main_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as error:
-        return ValidationResult(len(entries), 0, 0, (f"cannot read main.typ: {error}",))
+    except BibtexError as error:
+        return SourceCheck((), (), 0, (f"cannot parse library.bib: {error}",), False)
+    errors: list[str] = []
     if "download pending" in main_text.casefold():
         errors.append("catalog contains deprecated visible download-pending labels")
     try:
         catalog_items = parse_catalog(main_text)
     except CatalogError as error:
         errors.append(f"cannot parse main.typ: {error}")
-        return ValidationResult(len(entries), 0, 0, tuple(errors))
+        return SourceCheck(tuple(entries), (), 0, tuple(errors), False)
     bibliography_bindings = re.findall(
         r'(?m)^#let\s+bibliography-file\s*=\s*"library\.bib"\s*$', main_text
     )
@@ -168,11 +168,11 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
     dois: list[str] = []
     isbns: list[str] = []
     identifiers: dict[str, list[str]] = {name: [] for name in IDENTIFIER_FIELDS}
-    titles: list[str] = []
-    bib_paths: list[str] = []
+    identity_keys: dict[str, list[str]] = defaultdict(list)
+    distinct_from: dict[str, set[str]] = {}
+    local_paths: list[str] = []
     entry_by_key = {entry.citation_key: entry for entry in entries}
     pending = 0
-    available = 0
 
     for entry in entries:
         key = entry.citation_key
@@ -184,7 +184,7 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
             identity = record_identity(entry.entry_type, fields)
             if not identity:
                 errors.append(f"entry {key} has an empty normalized title")
-            titles.append(identity)
+            identity_keys[identity].append(key)
         if (
             not fields.get("author", "").strip()
             and not fields.get("editor", "").strip()
@@ -229,6 +229,23 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
         if is_audiovisual(entry.entry_type) and url and not is_safe_web_url(url):
             errors.append(f"entry {key} has an unsafe or non-HTTP(S) url")
 
+        distinct_value = fields.get(DISTINCT_FROM_FIELD)
+        if distinct_value is not None:
+            listed = key_list(distinct_value)
+            if not listed:
+                errors.append(f"entry {key} has an empty {DISTINCT_FROM_FIELD} field")
+            if len(set(listed)) != len(listed):
+                errors.append(f"entry {key} repeats a {DISTINCT_FROM_FIELD} key")
+            for other in listed:
+                if other == key:
+                    errors.append(f"entry {key} lists itself in {DISTINCT_FROM_FIELD}")
+                elif other not in entry_by_key:
+                    errors.append(
+                        f"entry {key} lists an unknown {DISTINCT_FROM_FIELD} key: "
+                        f"{other}"
+                    )
+            distinct_from[key] = set(listed)
+
         topic = entry.topic
         if not topic:
             errors.append(f"entry {key} has no % Topic marker")
@@ -261,35 +278,21 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
         if not file_value:
             pending += 1
             continue
-        available += 1
-        bib_paths.append(file_value)
+        local_paths.append(file_value)
         path_parts = Path(file_value).parts
-        if not file_value.startswith("Library/"):
+        if not file_value.startswith(f"{LIBRARY_DIRECTORY}/"):
             errors.append(f"library file path must be under Library/: {file_value}")
         if any(ord(character) > 127 for character in file_value):
             errors.append(f"library file path is not ASCII: {file_value}")
         if not path_parts or not NAME_RE.fullmatch(path_parts[-1]):
             errors.append(f"library filename is not canonical PascalCase: {file_value}")
-        path_topic = tuple(path_parts[1:-1]) if path_parts[:1] == ("Library",) else ()
+        path_topic = (
+            tuple(path_parts[1:-1]) if path_parts[:1] == (LIBRARY_DIRECTORY,) else ()
+        )
         if any(not TOPIC_RE.fullmatch(part) for part in path_topic):
             errors.append(f"library path contains a non-canonical topic: {file_value}")
         if keywords and path_topic != keywords:
             errors.append(f"entry {key} file path and keywords differ")
-
-        candidate, path_error = _safe_local_path(root, file_value)
-        if path_error:
-            errors.append(path_error)
-            continue
-        assert candidate is not None
-        if not candidate.is_file():
-            errors.append(
-                f"BibTeX file field points to a missing library file: {file_value}"
-            )
-            continue
-        try:
-            validate_media(candidate)
-        except MediaError as error:
-            errors.append(f"invalid library media {file_value}: {error}")
 
     for duplicate in _duplicates(dois):
         errors.append(f"duplicate DOI: {duplicate}")
@@ -298,9 +301,19 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
     for name, values in identifiers.items():
         for duplicate in _duplicates(values):
             errors.append(f"duplicate {name} identifier: {duplicate}")
-    for duplicate in _duplicates(titles):
-        errors.append(f"duplicate normalized title: {duplicate}")
-    for duplicate in _duplicates(bib_paths):
+    # A shared identity is allowed only when every pair is asserted distinct.
+    for identity, group in sorted(identity_keys.items()):
+        if not identity or len(group) < 2:
+            continue
+        if any(
+            second not in distinct_from.get(first, set())
+            and first not in distinct_from.get(second, set())
+            for first, second in combinations(group, 2)
+        ):
+            errors.append(
+                f"duplicate normalized title: {identity} ({', '.join(group)})"
+            )
+    for duplicate in _duplicates(local_paths):
         errors.append(f"multiple entries reference the same library file: {duplicate}")
 
     catalog_keys = [item.citation_key for item in catalog_items]
@@ -312,8 +325,7 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
             f"catalog links the same library file more than once: {duplicate}"
         )
 
-    catalog_source = main_text[: main_text.find("#bibliography")]
-    outside_items = list(catalog_source)
+    outside_items = list(catalog_source(main_text))
     for item in catalog_items:
         outside_items[item.start : item.end] = " " * (item.end - item.start)
     if CITATION_RE.search("".join(outside_items)):
@@ -381,8 +393,62 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
         elif item.url is not None or item.url_label:
             errors.append(f"audiovisual entry {key} shows a [URL] link without a url")
 
+    return SourceCheck(tuple(entries), tuple(local_paths), pending, tuple(errors), True)
+
+
+def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationResult:
+    root = root.expanduser().resolve()
+    errors: list[str] = []
+    bib_path = root / "library.bib"
+    main_path = root / "main.typ"
+    title_link_style_path = root / "styles/title-link.csl"
+    if not bib_path.is_file():
+        errors.append("missing bibliography: library.bib")
+    if not main_path.is_file():
+        errors.append("missing catalog source: main.typ")
+    if not title_link_style_path.is_file():
+        errors.append("missing catalog title-link style: styles/title-link.csl")
+    if errors:
+        return ValidationResult(0, 0, 0, tuple(errors))
+
+    try:
+        bib_text = bib_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        return ValidationResult(0, 0, 0, (f"cannot parse library.bib: {error}",))
+    try:
+        main_text = main_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        return ValidationResult(0, 0, 0, (f"cannot read main.typ: {error}",))
+
+    sources = check_sources(bib_text, main_text)
+    errors.extend(sources.errors)
+    if not sources.complete:
+        return ValidationResult(len(sources.entries), 0, 0, tuple(errors))
+
+    for file_value in sources.local_paths:
+        candidate, path_error = _safe_local_path(root, file_value)
+        if path_error:
+            errors.append(path_error)
+            continue
+        assert candidate is not None
+        if not candidate.is_file():
+            errors.append(
+                f"BibTeX file field points to a missing library file: {file_value}"
+            )
+            continue
+        try:
+            validate_media(candidate)
+        except MediaError as error:
+            errors.append(f"invalid library media {file_value}: {error}")
+
     disk_paths, disk_errors = _disk_media(root)
     errors.extend(disk_errors)
+    # Paths outside Library/ are already reported by the text checks.
+    bib_paths = [
+        value
+        for value in sources.local_paths
+        if value.startswith(f"{LIBRARY_DIRECTORY}/")
+    ]
     if Counter(disk_paths) != Counter(bib_paths):
         errors.append("library files on disk and BibTeX file fields differ")
         missing_paths = Counter(bib_paths) - Counter(disk_paths)
@@ -428,7 +494,9 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
                     suffix = f": {detail[-1]}" if detail else ""
                     errors.append(f"Typst compilation failed{suffix}")
 
-    return ValidationResult(len(entries), available, pending, tuple(errors))
+    return ValidationResult(
+        len(sources.entries), len(sources.local_paths), sources.pending, tuple(errors)
+    )
 
 
 def parse_args() -> argparse.Namespace:

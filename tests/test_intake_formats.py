@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 import json
 import fcntl
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -10,6 +11,8 @@ import sys
 import tempfile
 import unittest
 import zipfile
+
+from paperlib.catalog import parse_catalog
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -46,7 +49,10 @@ class IntakeFormatTests(unittest.TestCase):
         return self.run_manifests([manifest], *arguments)
 
     def run_manifests(
-        self, manifests: list[dict[str, object]], *arguments: str
+        self,
+        manifests: list[dict[str, object]],
+        *arguments: str,
+        environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         manifest_arguments: list[str] = []
         for index, manifest in enumerate(manifests):
@@ -66,6 +72,7 @@ class IntakeFormatTests(unittest.TestCase):
                 *arguments,
             ],
             cwd=self.root,
+            env=environment,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -329,8 +336,8 @@ class IntakeFormatTests(unittest.TestCase):
         study["fields"]["doi"] = "10.0000/synthetic-study"
         first = {
             "topic": {
-                "path": "Perspectives/PhilosophyOfScience",
-                "headings": ["Perspectives", "Philosophy of Science"],
+                "path": "AdjacentFields/PhilosophyOfScience",
+                "headings": ["Adjacent Fields", "Philosophy of Science"],
             },
             "items": [study],
         }
@@ -382,7 +389,7 @@ class IntakeFormatTests(unittest.TestCase):
         self.assertTrue(unrelated.is_file())
         self.assertTrue(
             (
-                self.root / "Library/Perspectives/PhilosophyOfScience/"
+                self.root / "Library/AdjacentFields/PhilosophyOfScience/"
                 "SyntheticFoundationalStudy.pdf"
             ).is_file()
         )
@@ -410,12 +417,12 @@ class IntakeFormatTests(unittest.TestCase):
         self.assertEqual(
             [topic["path"] for topic in topics],
             [
+                "AdjacentFields/PhilosophyOfScience",
                 "Literature/DigitalBooks",
-                "Perspectives/PhilosophyOfScience",
             ],
         )
         self.assertEqual(
-            topics[0],
+            topics[1],
             {
                 "path": "Literature/DigitalBooks",
                 "headings": ["Literature", "Digital Books"],
@@ -527,8 +534,8 @@ class IntakeFormatTests(unittest.TestCase):
         }
         manifest = {
             "topic": {
-                "path": "Perspectives/PhilosophyOfScience",
-                "headings": ["Perspectives", "Philosophy of Physics"],
+                "path": "AdjacentFields/PhilosophyOfScience",
+                "headings": ["Adjacent Fields", "Philosophy of Physics"],
             },
             "items": [item],
         }
@@ -1394,6 +1401,281 @@ class IntakeFormatTests(unittest.TestCase):
         self.assertIn("NanumGothicCoding", font_report)
         if "New Computer Modern Sans" in available_font_names:
             self.assertIn("NewCMSans", font_report)
+
+    @staticmethod
+    def pending_item(citation_key: str, title: str, **fields: str) -> dict[str, object]:
+        return {
+            "pending": True,
+            "citation_key": citation_key,
+            "entry_type": "article",
+            "title": title,
+            "fields": {"author": "Example, Ada", "date": "2026", **fields},
+        }
+
+    def assert_unchanged_after_rollback(
+        self,
+        result: subprocess.CompletedProcess[str],
+        source: Path,
+        original_bib: bytes,
+        original_main: bytes,
+    ) -> None:
+        self.assertEqual((self.root / "library.bib").read_bytes(), original_bib)
+        self.assertEqual((self.root / "main.typ").read_bytes(), original_main)
+        self.assertTrue(source.is_file(), result.stderr)
+        self.assertFalse((self.root / "Library").exists())
+        self.assertFalse((self.root / "Catalog.pdf").exists())
+        self.assertEqual(
+            sorted(path.name for path in self.root.glob(".Catalog.intake-*")), []
+        )
+
+    def test_direct_items_join_a_topic_that_already_has_subtopics(self) -> None:
+        subtopic = self.recording_manifest(
+            "Literature/DigitalBooks/Handbooks",
+            ["Literature", "Digital Books", "Handbooks"],
+            [self.pending_item("example2026childhandbook", "Synthetic child handbook")],
+        )
+        steps = [
+            self.manifest(
+                [self.pending_item("example2026parentone", "Synthetic parent one")]
+            ),
+            subtopic,
+            self.manifest(
+                [self.pending_item("example2026parenttwo", "Synthetic parent two")]
+            ),
+            self.recording_manifest(
+                "Literature",
+                ["Literature"],
+                [self.pending_item("example2026toplevel", "Synthetic top level")],
+            ),
+        ]
+        for manifest in steps:
+            dry_run = self.run_manifest(manifest)
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+            applied = self.run_manifest(manifest, "--apply")
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+
+        catalog = (self.root / "main.typ").read_text(encoding="utf-8")
+        headings = {item.citation_key: item.headings for item in parse_catalog(catalog)}
+        self.assertEqual(
+            headings,
+            {
+                "example2026parentone": ("Literature", "Digital Books"),
+                "example2026parenttwo": ("Literature", "Digital Books"),
+                "example2026childhandbook": (
+                    "Literature",
+                    "Digital Books",
+                    "Handbooks",
+                ),
+                "example2026toplevel": ("Literature",),
+            },
+        )
+        self.assertLess(
+            catalog.index("@example2026parenttwo"), catalog.index("=== Handbooks")
+        )
+
+    def test_apply_rolls_back_when_validation_fails(self) -> None:
+        pdf = self.inbox / "rejected.pdf"
+        self.write_pdf(pdf)
+        manifest = self.manifest(
+            [
+                self.item(
+                    "Inbox/rejected.pdf",
+                    "SyntheticRejectedStudy.pdf",
+                    "example2026rejectedstudy",
+                    "Synthetic rejected study",
+                    entry_type="article",
+                )
+            ]
+        )
+        validator = self.root / "scripts/validate-library.sh"
+        validator.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+        original_bib = (self.root / "library.bib").read_bytes()
+        original_main = (self.root / "main.typ").read_bytes()
+
+        result = self.run_manifest(manifest, "--apply")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("library validation failed", result.stderr)
+        self.assert_unchanged_after_rollback(result, pdf, original_bib, original_main)
+
+    def test_apply_rolls_back_when_the_catalog_build_fails(self) -> None:
+        pdf = self.inbox / "unbuilt.pdf"
+        self.write_pdf(pdf)
+        manifest = self.manifest(
+            [
+                self.item(
+                    "Inbox/unbuilt.pdf",
+                    "SyntheticUnbuiltStudy.pdf",
+                    "example2026unbuiltstudy",
+                    "Synthetic unbuilt study",
+                    entry_type="article",
+                )
+            ]
+        )
+        fake_bin = self.root.parent / "fake-bin"
+        fake_bin.mkdir()
+        fake_typst = fake_bin / "typst"
+        fake_typst.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        fake_typst.chmod(0o755)
+        environment = {
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        }
+        original_bib = (self.root / "library.bib").read_bytes()
+        original_main = (self.root / "main.typ").read_bytes()
+
+        result = self.run_manifests([manifest], "--apply", environment=environment)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("catalog build failed", result.stderr)
+        self.assert_unchanged_after_rollback(result, pdf, original_bib, original_main)
+
+    def test_interrupted_apply_rolls_back_every_change(self) -> None:
+        validator = self.root / "scripts/validate-library.sh"
+        original_bib = (self.root / "library.bib").read_bytes()
+        original_main = (self.root / "main.typ").read_bytes()
+        for signal_name in ("INT", "TERM"):
+            with self.subTest(signal=signal_name):
+                pdf = self.inbox / f"interrupted-{signal_name.casefold()}.pdf"
+                self.write_pdf(pdf)
+                # The validator runs after files move and sources are rewritten,
+                # so signalling from it interrupts the middle of the transaction.
+                validator.write_text(
+                    f'#!/usr/bin/env bash\nkill -{signal_name} "$PPID"\n'
+                    "exec sleep 30\n",
+                    encoding="utf-8",
+                )
+                manifest = self.manifest(
+                    [
+                        self.item(
+                            f"Inbox/{pdf.name}",
+                            "SyntheticInterruptedStudy.pdf",
+                            "example2026interruptedstudy",
+                            "Synthetic interrupted study",
+                            entry_type="article",
+                        )
+                    ]
+                )
+
+                result = self.run_manifest(manifest, "--apply")
+
+                self.assertEqual(result.returncode, 130, result.stderr)
+                self.assertIn("changes were rolled back", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assert_unchanged_after_rollback(
+                    result, pdf, original_bib, original_main
+                )
+                pdf.unlink()
+
+    def test_distinct_from_admits_a_verified_distinct_work_with_the_same_title(
+        self,
+    ) -> None:
+        article = self.pending_item(
+            "example2015syntheticlearning",
+            "Synthetic learning",
+            date="2015",
+            journaltitle="Journal of Synthetic Examples",
+        )
+        first = self.run_manifest(self.manifest([article]), "--apply")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        book = {
+            "pending": True,
+            "citation_key": "researcher2016syntheticlearning",
+            "entry_type": "book",
+            "title": "Synthetic Learning",
+            "fields": {
+                "author": "Researcher, Ben",
+                "date": "2016",
+                "publisher": "Example Press",
+            },
+        }
+
+        refused = self.run_manifest(self.manifest([book]))
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("duplicate normalized title", refused.stderr)
+        self.assertIn("matches example2015syntheticlearning", refused.stderr)
+        self.assertIn("distinct_from", refused.stderr)
+
+        book["distinct_from"] = ["example2015syntheticlearning"]
+        dry_run = self.run_manifest(self.manifest([book]))
+        self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+        self.assertIn("DISTINCT FROM example2015syntheticlearning", dry_run.stdout)
+        applied = self.run_manifest(self.manifest([book]), "--apply")
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        bibliography = (self.root / "library.bib").read_text(encoding="utf-8")
+        self.assertRegex(
+            bibliography, r"distinctfrom\s+= \{example2015syntheticlearning\}"
+        )
+
+    def test_distinct_from_must_name_exactly_the_matching_records(self) -> None:
+        records = [
+            self.pending_item("example2020sharedtitle", "Synthetic shared title"),
+            self.pending_item("example2021othertitle", "Synthetic other title"),
+        ]
+        applied = self.run_manifest(self.manifest(records), "--apply")
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        cases = [
+            (["example2021othertitle"], "do not share this record's identity"),
+            (["example2026newtitle"], "cannot list the record itself"),
+            (["Not A Key"], "must be a citation key"),
+            ([], "non-empty array"),
+        ]
+        for distinct_from, message in cases:
+            with self.subTest(message=message):
+                item = self.pending_item(
+                    "example2026newtitle", "Synthetic shared title"
+                )
+                item["distinct_from"] = distinct_from
+                result = self.run_manifest(self.manifest([item]))
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(message, result.stderr)
+
+        smuggled = self.pending_item(
+            "example2026newtitle",
+            "Synthetic shared title",
+            distinctfrom="example2020sharedtitle",
+        )
+        result = self.run_manifest(self.manifest([smuggled]))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("use items[0].distinct_from", result.stderr)
+
+    def test_dry_run_reports_a_planned_state_that_would_fail_validation(self) -> None:
+        applied = self.run_manifest(
+            self.manifest(
+                [self.pending_item("example2026drifted", "Synthetic drifted title")]
+            ),
+            "--apply",
+        )
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        main_path = self.root / "main.typ"
+        main_path.write_text(
+            main_path.read_text(encoding="utf-8").replace(
+                '"Synthetic drifted title"', '"A hand-edited title"'
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_manifest(
+            self.manifest(
+                [self.pending_item("example2026unrelated", "Synthetic unrelated")]
+            )
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("the planned library state would fail validation", result.stderr)
+        self.assertIn(
+            "catalog and BibTeX titles differ for example2026drifted", result.stderr
+        )
+
+    def test_field_value_ending_in_a_backslash_fails_the_dry_run(self) -> None:
+        item = self.pending_item(
+            "example2026backslash", "Synthetic backslash", note="See C:\\"
+        )
+
+        result = self.run_manifest(self.manifest([item]))
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("trailing backslash in items[0].fields.note", result.stderr)
 
 
 if __name__ == "__main__":

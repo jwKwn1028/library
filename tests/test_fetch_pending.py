@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import io
 from pathlib import Path
 import sys
@@ -73,7 +74,11 @@ SECOND_PENDING_ENTRY = """
 
 
 class FakeDiscoveryClient:
+    def __init__(self) -> None:
+        self.sources: list[str] = []
+
     def json(self, url: str, source: str):
+        self.sources.append(source)
         if source == "Semantic Scholar":
             return {
                 "paperId": "0" * 40,
@@ -94,22 +99,6 @@ class FakeDiscoveryClient:
                 },
                 "oa_locations": [],
             }
-        if source == "OpenAlex":
-            return {
-                "results": [
-                    {
-                        "id": "https://openalex.org/W123",
-                        "doi": "https://doi.org/10.0000/SYNTHETIC-PENDING",
-                        "best_oa_location": {
-                            "is_oa": True,
-                            "pdf_url": "https://archive.test/manuscript.pdf",
-                            "version": "acceptedVersion",
-                            "source": {"display_name": "Synthetic Archive"},
-                        },
-                        "locations": [],
-                    }
-                ]
-            }
         return {
             "message": {
                 "link": [
@@ -122,7 +111,15 @@ class FakeDiscoveryClient:
                         "URL": "https://publisher.test/article.xml",
                         "content-type": "application/xml",
                     },
-                ]
+                ],
+                "relation": {
+                    "has-preprint": [
+                        # The same arXiv copy Semantic Scholar reports.
+                        {"id-type": "doi", "id": "10.48550/arXiv.2601.00001"},
+                        {"id-type": "doi", "id": "10.0000/synthetic-preprint"},
+                        {"id-type": "uri", "id": "https://preprints.test/1"},
+                    ]
+                },
             }
         }
 
@@ -216,19 +213,21 @@ class FetchPendingTests(unittest.TestCase):
             )
 
     def test_discovers_oa_and_crossref_pdf_candidates(self) -> None:
+        client = FakeDiscoveryClient()
         candidates, errors = fetch_pending.discover_candidates(
-            self.record, FakeDiscoveryClient(), "reader" + "@" + "example.test"
+            self.record, client, "reader" + "@" + "example.test"
         )
 
         self.assertEqual(errors, [])
+        self.assertEqual(client.sources, ["Unpaywall", "Semantic Scholar", "Crossref"])
         self.assertEqual(
             [candidate.source for candidate in candidates],
             [
                 "Unpaywall (acceptedVersion)",
-                "OpenAlex OA (acceptedVersion; Synthetic Archive)",
                 "Semantic Scholar OA (green)",
                 "Crossref full text (vor)",
                 "arXiv (2601.00001)",
+                "Crossref preprint (10.0000/synthetic-preprint)",
                 "DOI resolver",
             ],
         )
@@ -236,7 +235,74 @@ class FetchPendingTests(unittest.TestCase):
             fetch_pending.display_url(candidates[0].url),
             "https://repository.test/open.pdf",
         )
-        self.assertEqual(candidates[4].url, "https://arxiv.org/pdf/2601.00001")
+        self.assertEqual(candidates[3].url, "https://arxiv.org/pdf/2601.00001")
+        self.assertEqual(
+            candidates[4].url, "https://doi.org/10.0000/synthetic-preprint"
+        )
+
+    def test_crossref_preprint_relations_become_pdf_candidates(self) -> None:
+        cases = [
+            (("doi", "10.48550/arXiv.2601.00002"), "https://arxiv.org/pdf/2601.00002"),
+            (("arxiv", "arXiv:2601.00003v2"), "https://arxiv.org/pdf/2601.00003v2"),
+            (
+                ("doi", "https://doi.org/10.0000/synthetic-preprint"),
+                "https://doi.org/10.0000/synthetic-preprint",
+            ),
+        ]
+        for relation, url in cases:
+            with self.subTest(relation=relation):
+                self.assertEqual(fetch_pending.preprint_candidate(*relation).url, url)
+        for relation in (("uri", "https://preprints.test/1"), ("doi", "not-a-doi")):
+            with self.subTest(relation=relation):
+                self.assertIsNone(fetch_pending.preprint_candidate(*relation))
+
+    def test_short_titles_also_need_the_first_creator(self) -> None:
+        # "Ing" also occurs inside words such as learning and training.
+        record = replace(
+            self.record, title="Synthetic learning", author="Ing, Ada and Example, Bo"
+        )
+        unrelated = "Progress in synthetic learning during training\nBo Example"
+
+        self.assertEqual(fetch_pending.identity_score(unrelated, record)[0], 0)
+        self.assertEqual(
+            fetch_pending.identity_score("Synthetic Learning\nAda Ing", record)[0], 2
+        )
+        spaced = replace(record, author="Vanexample, Ada")
+        self.assertEqual(
+            fetch_pending.identity_score("Synthetic learning\nAda Van Example", spaced)[
+                0
+            ],
+            2,
+        )
+
+    def test_editor_only_pending_record_uses_its_editor(self) -> None:
+        with (self.root / "library.bib").open("a", encoding="utf-8") as bibliography:
+            bibliography.write(
+                """
+@book{editor2026handbook,
+  editor    = {Editor, Erin},
+  title     = {Synthetic handbook},
+  date      = {2026},
+  publisher = {Example Press},
+  doi       = {10.0000/synthetic-handbook},
+  keywords  = {QuantumChemistry, ElectronicStructure, ExampleTheory},
+  file      = {}
+}
+"""
+            )
+        record = fetch_pending.select_records(
+            fetch_pending.load_pending_records(self.root), ["editor2026handbook"]
+        )[0]
+
+        self.assertEqual(record.author, "Editor, Erin")
+        self.assertEqual(
+            fetch_pending.identity_score("Synthetic handbook\nErin Editor", record)[0],
+            2,
+        )
+        self.assertEqual(
+            fetch_pending.identity_score("Synthetic handbook\nAda Example", record)[0],
+            0,
+        )
 
     def test_semantic_scholar_rejects_a_different_work(self) -> None:
         client = mock.Mock()

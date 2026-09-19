@@ -40,7 +40,13 @@
 - Keep identifying words the audit cannot infer, such as an institution or lab,
   in the Git-ignored `.paper-library-private-terms` file, one term per line.
   The audit rejects those terms and institutional proxy URLs in public files,
-  the index, and history without printing the matched value.
+  the index, history, and commit or annotated-tag messages without printing
+  the matched value.
+- Commit messages are published with history. The `commit-msg` hook runs
+  `scripts/public-repo audit-message`, which applies the same checks while
+  allowing no-reply addresses such as a `Co-Authored-By` trailer.
+- `LICENSE` (MIT) covers only the public framework, never private library
+  records or media.
 
 ## Sources of truth
 
@@ -125,7 +131,9 @@ For each new PDF, EPUB, or MOBI item:
    `schemas/intake-manifest.schema.json`. Record optional `metadata_sources`
    HTTP(S) URLs when durable provenance is useful.
 10. Run `scripts/intake-papers --manifest <path>` and review the dry run. Repeat
-    `--manifest` to preflight several topics as one batch.
+    `--manifest` to preflight several topics as one batch. The dry run also
+    applies the validator's text rules to the planned bibliography and catalog,
+    so it fails wherever the apply would.
 11. Apply with `--apply` only when every proposed move and metadata field is
     correct. The repeated-manifest batch is one transaction. Use
     `--delete-sidecars` only when sidecar removal is in scope.
@@ -140,6 +148,10 @@ For each new PDF, EPUB, or MOBI item:
 The intake command takes an advisory `.paper-library.lock` for dry runs,
 status/topic reads, and applies. Do not bypass it; resolve a busy-library error
 or use a reviewed finite `--lock-timeout`.
+
+An apply that fails, or is interrupted by Ctrl-C, `SIGTERM`, or `SIGHUP`, rolls
+back its moves and writes; an interrupted apply exits with status 130. Report
+it as incomplete.
 
 ## Web metadata and BibTeX policy
 
@@ -219,8 +231,9 @@ then let the intake script update the canonical database transactionally.
   evidence and finish through the ordinary manifest dry run and apply.
   `PAPER_LIBRARY_LOOKUP_CONTACT` may identify the user to those services at
   runtime; never store or print it.
-- Albums and films use the top-level `Music` and `Film` topics unless the user
-  chooses otherwise.
+- File albums under `Music` and films under `Film`, subdivided by genre,
+  tradition, or movement (for example `Music/Jazz` or `Film/Crime`), unless
+  the user chooses otherwise.
 
 ## Canonical library-file naming
 
@@ -286,12 +299,15 @@ Examples:
   forms as one identity. Existing valid formatted ISBNs remain acceptable.
 - Do not store downloaded abstracts or redundant URLs unless they add ongoing
   value to the library.
+- A `distinctfrom` field lists the keys of verified distinct works that share
+  the record's normalized identity. Only intake writes it, from a reviewed
+  manifest `distinct_from` array; never add it by hand to pass validation.
 
 ## Classification
 
 Choose the most specific existing directory matching the item's primary
 contribution. When an item spans a method and an application, classify by the
-main contribution rather than a secondary use case. Use `Perspectives` only for
+main contribution rather than a secondary use case. Use `AdjacentFields` only for
 adjacent or foundational research outside the core domains, such as philosophy
 of science or classic essays. Never file a book, film, or album there: a book
 belongs under its subject topic or `Literature`, a film under `Film`, and an
@@ -306,7 +322,7 @@ Recognized top-level topics include:
 - `LOHC`
 - `Music`
 - `Optimization`
-- `Perspectives`
+- `AdjacentFields`
 - `QuantumChemistry`
 
 Create a directory only when no existing directory is a clean fit, the topic is
@@ -345,6 +361,11 @@ directory, explain the ambiguity, and suggest a future category.
   `scripts/export-bibliography`. It generates UTF-8 RIS, preserves citation
   keys and taxonomy keywords, and omits local attachment paths. Albums export
   as `SOUND` and films as `MPCT` or `VIDEO`.
+- For a requested subset, filter with `--type` (`paper`, `book`, `music`,
+  `film`, or an exact entry type), `--topic` (top-level topics), and
+  `--subtopic` (a path such as `Film/Crime`, or a name under any topic).
+  Values of one option match any; different options must all match. Give each
+  subset its own `--output`, and report the matched count from the summary.
 - The exporter is deterministic and offline. It must never edit `library.bib`
   or `main.typ`, and it must refuse to replace an output unless `--force` is
   explicit.
@@ -355,9 +376,13 @@ directory, explain the ambiguity, and suggest a future category.
 
 - The validator uses the shared parser in `paperlib/`; do not add independent
   regex-based interpretations of BibTeX or catalog items.
-- `Inbox/` is a private staging area, not canonical media. The validator ignores
-  it when checking cataloged media, while intake and staging still use its files
-  for duplicate-content checks.
+- Only `Library/` holds canonical media, and the validator scans only
+  `Library/` for it. `Inbox/` is a private staging area, and media elsewhere
+  (notes, exports, previews) is not library state. Intake, staging, and
+  `fetch-pending --match` still check `Library/` and `Inbox/` for duplicate
+  content.
+- The intake dry run reuses the validator's text checks, so add a new text rule
+  to `paperlib/validation.py` rather than only to the engine.
 - It must compare titles, citation multiplicity, topic markers, keywords,
   heading paths, attachment links, audiovisual `[URL]` links, identifiers,
   on-disk paths, media signatures, and hashes.
@@ -369,6 +394,12 @@ directory, explain the ambiguity, and suggest a future category.
 
 - Do not retain a second copy of the same item unless it is meaningfully
   different, such as a supplement or appendix.
+- A normalized title shared with an existing record is rejected. When
+  authoritative sources show a genuinely different work with the same title,
+  list every matching key in the item's `distinct_from` array and explain the
+  distinction in the report. Never use it to keep a second copy of the same
+  item; the rule above still decides whether a version is meaningfully
+  different.
 - Prefer canonical naming when filenames differ only by punctuation or case.
 - If two incoming items claim the same DOI but differ in content, stop and
   investigate rather than choosing one automatically.
