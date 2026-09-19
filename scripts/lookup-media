@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+lookup_script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+lookup_library_root=$(cd -- "$lookup_script_dir/.." && pwd)
+
+exec python3 \
+  "$lookup_library_root/skills/music-film-intake/scripts/lookup_media.py" \
+  "$@" --root "$lookup_library_root"

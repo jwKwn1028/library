@@ -26,6 +26,8 @@ LEGACY_REFERENCE_TITLE_RE = re.compile(
 ATTACHMENT_LABEL_RE = re.compile(
     r"#text\s*\([^)]*\)\s*\[\s*\\\[(PDF|EPUB|MOBI)\\\]\s*\]", re.DOTALL
 )
+URL_LABEL_RE = re.compile(r"#text\s*\([^)]*\)\s*\[\s*\\\[URL\\\]\s*\]", re.DOTALL)
+WEB_LINK_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 
 class CatalogError(RuntimeError):
@@ -42,6 +44,8 @@ class CatalogItem:
     headings: tuple[str, ...]
     start: int
     end: int
+    url: str | None = None
+    url_label: bool = False
 
 
 def heading_component(heading: str) -> str:
@@ -120,8 +124,19 @@ def parse_catalog(text: str) -> list[CatalogItem]:
             )
         citation_key = citations[0]
 
-        link = LINK_RE.search(block)
-        path = _decode_string(link.group(1), citation_key) if link else None
+        links = [
+            _decode_string(match.group(1), citation_key)
+            for match in LINK_RE.finditer(block)
+        ]
+        web_links = [target for target in links if WEB_LINK_RE.match(target)]
+        local_links = [target for target in links if not WEB_LINK_RE.match(target)]
+        if len(local_links) > 1 or len(web_links) > 1:
+            raise CatalogError(
+                f"catalog item {citation_key} must have at most one library-file "
+                "link and one web link"
+            )
+        path = local_links[0] if local_links else None
+        url = web_links[0] if web_links else None
         reference_title = REFERENCE_TITLE_RE.search(block)
         legacy_reference_title = LEGACY_REFERENCE_TITLE_RE.search(block)
         reference_title_key = reference_title.group(1) if reference_title else None
@@ -133,7 +148,7 @@ def parse_catalog(text: str) -> list[CatalogItem]:
             title = _decode_string(legacy_reference_title.group(1), citation_key)
         elif title_match := TEXT_RE.search(block):
             title = _decode_string(title_match.group(1), citation_key)
-        elif link:
+        elif links:
             title = _raw_link_title(block, citation_key) or ""
         else:
             title = _plain_title(block, citation_key)
@@ -149,6 +164,8 @@ def parse_catalog(text: str) -> list[CatalogItem]:
                 headings=tuple(headings),
                 start=start,
                 end=end,
+                url=url,
+                url_label=URL_LABEL_RE.search(block) is not None,
             )
         )
     return items

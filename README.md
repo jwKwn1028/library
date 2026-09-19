@@ -16,10 +16,19 @@ A Typst catalog for research papers and books. See
 ```sh
 ./scripts/stage-papers /path/to/document.pdf [--apply]
 ./scripts/intake-papers --write-template /tmp/paper-intake.json
+./scripts/intake-papers topics --json
 ./scripts/intake-papers --manifest /tmp/paper-intake.json [--apply]
 ./scripts/intake-papers status --pending
 ./scripts/fetch-pending --key author2026shorttitle [--apply] [--browser]
 ./scripts/fetch-pending --match ~/Downloads [--apply]
+```
+
+Albums and films are pending records whose catalog entries link to a URL:
+
+```sh
+./scripts/lookup-media music "Album Title" --artist "Artist Name"
+./scripts/lookup-media film "Film Title" --year 2026
+./scripts/lookup-media music --id MUSICBRAINZ-RELEASE-GROUP-ID   # draft item
 ```
 
 Manifests follow `schemas/intake-manifest.schema.json`.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Music and Film Intake"
+  short_description: "Catalog albums and films as URL-linked pending records"
+  default_prompt: "Use $music-film-intake to add albums or films as verified pending records whose catalog entries link to a URL until a local file exists."

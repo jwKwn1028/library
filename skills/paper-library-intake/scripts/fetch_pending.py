@@ -31,6 +31,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from paperlib.bibtex import (  # noqa: E402
     BibtexError,
+    is_audiovisual,
     normalize_doi,
     parse_bibliography,
     plain_text,
@@ -302,6 +303,9 @@ def load_pending_records(root: Path) -> list[PendingRecord]:
     records: list[PendingRecord] = []
     for entry in entries:
         if entry.fields.get("file", "").strip():
+            continue
+        # Albums and films are never PDFs, even when a film carries an EIDR DOI.
+        if is_audiovisual(entry.entry_type):
             continue
         doi = entry.fields.get("doi", "").strip()
         if not doi:

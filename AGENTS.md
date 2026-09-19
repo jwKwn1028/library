@@ -5,9 +5,9 @@
 - These instructions apply to this directory and all descendants.
 - This repository is a reusable research-document library and Typst catalog
   framework. A working clone also contains private, Git-ignored library data.
-- Apply intake rules to newly added PDF, EPUB, and MOBI files. Do not
-  mass-rename, recategorize, or reorganize existing items unless the user
-  explicitly requests it.
+- Apply intake rules to newly added PDF, EPUB, and MOBI files. Albums and films
+  follow the music and film rules below. Do not mass-rename, recategorize, or
+  reorganize existing items unless the user explicitly requests it.
 - Metadata-only reading-list additions are allowed when explicitly requested.
   Represent them as pending downloads; do not fabricate local file paths or
   create placeholder media files. Applying a pending manifest still creates
@@ -56,8 +56,9 @@
   directories. It is not part of the conceptual taxonomy or BibTeX keywords.
 - RIS files produced by `scripts/export-bibliography` are private derived
   metadata, never a second source of truth.
-- JSON reports produced by `scripts/intake-papers --report-json` are private
-  provenance snapshots, never a bibliography or catalog source of truth.
+- JSON reports produced by `scripts/intake-papers --report-json` or
+  `--report-base` are private provenance snapshots, never a bibliography or
+  catalog source of truth.
 - `templates/main.typ` and `templates/library.bib` are sanitized initialization
   seeds, not mirrors or backups of private state. Its `catalog-author` and
   `catalog-updated` defaults must remain empty.
@@ -113,10 +114,11 @@ For each new PDF, EPUB, or MOBI item:
    document and correct missing or conflicting fields.
 5. Obtain missing metadata from authoritative web sources when needed, following
    the web-metadata policy below.
-6. Determine the item's primary contribution and select the narrowest matching
-   existing topic directory.
+6. Run `scripts/intake-papers topics --json`, determine the item's primary
+   contribution, and select the narrowest matching existing topic directory.
 7. Choose a short, distinctive canonical filename and stable citation key.
-8. Check for duplicate DOI, key, normalized title, local path, and file content.
+8. Check for duplicate DOI, ISBN, key, normalized catalog title, local path,
+   and file content.
 9. Create one reviewed JSON manifest per destination topic as documented in
    `skills/paper-library-intake/references/intake-contract.md`.
    The preferred form also has a public machine-readable schema at
@@ -127,23 +129,27 @@ For each new PDF, EPUB, or MOBI item:
 11. Apply with `--apply` only when every proposed move and metadata field is
     correct. The repeated-manifest batch is one transaction. Use
     `--delete-sidecars` only when sidecar removal is in scope.
-12. When requested or useful for a complex batch, write a private provenance
-    snapshot with `--report-json reports/<name>.json`; use `--force-report` only
-    to replace a known report.
+12. When requested or useful for a complex batch, prefer `--report-base
+    reports/<name>` so review and apply create separate `.dry-run.json` and
+    `.applied.json` snapshots. Use `--report-json reports/<name>.json` only when
+    one exact output path is intended; use `--force-report` only to replace a
+    known phase report.
 13. Confirm `scripts/validate-library.sh` passes and `Catalog.pdf` builds in
     the root.
 
 The intake command takes an advisory `.paper-library.lock` for dry runs,
-status reads, and applies. Do not bypass it; resolve a busy-library error or
-use a reviewed finite `--lock-timeout`.
+status/topic reads, and applies. Do not bypass it; resolve a busy-library error
+or use a reviewed finite `--lock-timeout`.
 
 ## Web metadata and BibTeX policy
 
 Web metadata retrieval belongs to the intake agent, not the transactional
 intake script. `scripts/fetch-pending` is the separate network-aware acquisition
 helper for explicitly requested DOI-backed pending downloads; it may write only
-verified PDFs to ignored `Inbox/`. `intake-papers` must remain deterministic,
-offline, and limited to reviewed manifest data.
+verified PDFs to ignored `Inbox/` and ignores albums and films.
+`scripts/lookup-media` is a second networked helper that only prints album and
+film metadata drafts. `intake-papers` must remain deterministic, offline, and
+limited to reviewed manifest data.
 
 Run the fetcher without `--apply` first and prefer explicit `--key` selections.
 Use `--all` only when the user requests the full pending set. Set
@@ -187,6 +193,34 @@ Keep downloaded web exports in `/tmp` or a clearly temporary intake location.
 Do not let a publisher export, Crossref response, Zotero export, or other remote
 record overwrite `library.bib`. Normalize verified values into the manifest,
 then let the intake script update the canonical database transactionally.
+
+## Music and film records
+
+- For albums and films, load `music-film-intake` when available. Its workspace
+  source is `skills/music-film-intake/SKILL.md`.
+- Record an album as `@audio` with `type = {Album}` and a film as `@movie` with
+  `type = {Film}`. The engine also treats `@music` and `@video` as audiovisual.
+  Put the artist credit or directors in `author`; Typst drops an `editor`-only
+  film director.
+- These records are pending: omit `source_file` and `canonical_filename` and
+  keep `file` empty until a local path exists. Local audio and video
+  attachment is not supported yet; never invent a path.
+- An audiovisual record's optional `url` must be a credential-free HTTP(S) URL.
+  The catalog shows it as a separate bracketed `[URL]` link after the title,
+  which still links to its References entry. Other record types never show
+  `[URL]`.
+- Optional `musicbrainz` (an album's release group or a song's recording),
+  `imdb`, and `wikidata` identifiers are stored as bare IDs and must be unique
+  across the library.
+- An audiovisual duplicate is the same normalized title, medium, release year,
+  and first creator, so a film may share a novel's title and remakes coexist.
+- `scripts/lookup-media music|film` searches MusicBrainz or Wikidata and prints
+  a draft pending manifest item; it writes nothing. Treat drafts as untrusted
+  evidence and finish through the ordinary manifest dry run and apply.
+  `PAPER_LIBRARY_LOOKUP_CONTACT` may identify the user to those services at
+  runtime; never store or print it.
+- Albums and films use the top-level `Music` and `Film` topics unless the user
+  chooses otherwise.
 
 ## Canonical library-file naming
 
@@ -241,6 +275,15 @@ Examples:
   the physical `Library` prefix.
 - Protect capitalization in BibTeX where required, while keeping the plain
   Unicode display title in `main.typ`.
+- Keep subtitles in the BibLaTeX `subtitle` field; the catalog topic list
+  renders a populated subtitle as `title: subtitle`.
+- For a numbered book series, keep the individual work in `title`, the series
+  name in `series`, and its sequence in `number`; the catalog renders
+  `series #number: title: subtitle` (omitting the final subtitle segment when
+  absent).
+- Supply one ISBN-10 or ISBN-13 for the cataloged edition. Intake validates its
+  checksum, stores new values as unseparated ISBN-13, and deduplicates both
+  forms as one identity. Existing valid formatted ISBNs remain acceptable.
 - Do not store downloaded abstracts or redundant URLs unless they add ongoing
   value to the library.
 
@@ -248,16 +291,22 @@ Examples:
 
 Choose the most specific existing directory matching the item's primary
 contribution. When an item spans a method and an application, classify by the
-main contribution rather than a secondary use case. Use `PeripheralEsoteric`
-only for adjacent or foundational material outside the core domains.
+main contribution rather than a secondary use case. Use `Perspectives` only for
+adjacent or foundational research outside the core domains, such as philosophy
+of science or classic essays. Never file a book, film, or album there: a book
+belongs under its subject topic or `Literature`, a film under `Film`, and an
+album under `Music`.
 
 Recognized top-level topics include:
 
 - `DeepLearningForMaterialsScience`
+- `Film`
 - `HeterogeneousCatalysis`
+- `Literature`
 - `LOHC`
+- `Music`
 - `Optimization`
-- `PeripheralEsoteric`
+- `Perspectives`
 - `QuantumChemistry`
 
 Create a directory only when no existing directory is a clean fit, the topic is
@@ -274,6 +323,8 @@ directory, explain the ambiguity, and suggest a future category.
   media is present, add a separate `[PDF]`, `[EPUB]`, or `[MOBI]` link to the local
   file; omit that link without adding visible download-status text while the
   record is pending. Keep the bibliography section labeled `<references>`.
+- For an album or film with a `url`, add one separate `[URL]` link to exactly
+  that URL after any media link.
 - Keep attachment-portability guidance in `docs/usage.md`, not as visible text
   in the generated catalog.
 - Keep New Computer Modern Sans as the primary catalog font and the
@@ -292,7 +343,8 @@ directory, explain the ambiguity, and suggest a future category.
 - Zotero can import the canonical BibLaTeX `library.bib` directly.
 - For a portable Zotero/EndNote interchange file, run
   `scripts/export-bibliography`. It generates UTF-8 RIS, preserves citation
-  keys and taxonomy keywords, and omits local attachment paths.
+  keys and taxonomy keywords, and omits local attachment paths. Albums export
+  as `SOUND` and films as `MPCT` or `VIDEO`.
 - The exporter is deterministic and offline. It must never edit `library.bib`
   or `main.typ`, and it must refuse to replace an output unless `--force` is
   explicit.
@@ -307,7 +359,8 @@ directory, explain the ambiguity, and suggest a future category.
   it when checking cataloged media, while intake and staging still use its files
   for duplicate-content checks.
 - It must compare titles, citation multiplicity, topic markers, keywords,
-  heading paths, attachment links, on-disk paths, media signatures, and hashes.
+  heading paths, attachment links, audiovisual `[URL]` links, identifiers,
+  on-disk paths, media signatures, and hashes.
 - Run `scripts/test` after framework changes. It is the local equivalent of the
   public CI workflow and includes unit tests, formatting/linting, shell checks,
   the privacy audit, and private validation when private root state exists.

@@ -13,11 +13,20 @@ import sys
 import tempfile
 
 from paperlib.bibtex import (
+    IDENTIFIER_FIELDS,
     BibtexError,
+    catalog_title,
+    is_audiovisual,
     is_canonical_date,
     is_canonical_doi,
+    is_canonical_identifier,
+    is_safe_web_url,
+    is_valid_isbn,
     normalize_doi,
+    normalize_identifier,
+    normalize_isbn,
     parse_bibliography,
+    record_identity,
     title_identity,
 )
 from paperlib.catalog import CITATION_RE, CatalogError, heading_component, parse_catalog
@@ -157,6 +166,8 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
             )
 
     dois: list[str] = []
+    isbns: list[str] = []
+    identifiers: dict[str, list[str]] = {name: [] for name in IDENTIFIER_FIELDS}
     titles: list[str] = []
     bib_paths: list[str] = []
     entry_by_key = {entry.citation_key: entry for entry in entries}
@@ -170,7 +181,7 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
         if not title:
             errors.append(f"entry {key} has no title")
         else:
-            identity = title_identity(title)
+            identity = record_identity(entry.entry_type, fields)
             if not identity:
                 errors.append(f"entry {key} has an empty normalized title")
             titles.append(identity)
@@ -196,6 +207,27 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
             if not is_canonical_doi(doi):
                 errors.append(f"entry {key} has a non-canonical DOI: {doi}")
             dois.append(normalized.casefold())
+
+        isbn = fields.get("isbn", "").strip()
+        if isbn:
+            if not is_valid_isbn(isbn):
+                errors.append(f"entry {key} has an invalid ISBN: {isbn}")
+            else:
+                isbns.append(normalize_isbn(isbn))
+
+        for name in IDENTIFIER_FIELDS:
+            identifier = fields.get(name, "").strip()
+            if not identifier:
+                continue
+            if not is_canonical_identifier(name, identifier):
+                errors.append(
+                    f"entry {key} has a non-canonical {name} identifier: {identifier}"
+                )
+            identifiers[name].append(normalize_identifier(name, identifier))
+
+        url = fields.get("url", "").strip()
+        if is_audiovisual(entry.entry_type) and url and not is_safe_web_url(url):
+            errors.append(f"entry {key} has an unsafe or non-HTTP(S) url")
 
         topic = entry.topic
         if not topic:
@@ -261,6 +293,11 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
 
     for duplicate in _duplicates(dois):
         errors.append(f"duplicate DOI: {duplicate}")
+    for duplicate in _duplicates(isbns):
+        errors.append(f"duplicate ISBN: {duplicate}")
+    for name, values in identifiers.items():
+        for duplicate in _duplicates(values):
+            errors.append(f"duplicate {name} identifier: {duplicate}")
     for duplicate in _duplicates(titles):
         errors.append(f"duplicate normalized title: {duplicate}")
     for duplicate in _duplicates(bib_paths):
@@ -298,7 +335,7 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
         if len(matching) != 1:
             continue
         item = matching[0]
-        if title_identity(item.title) != title_identity(entry.fields.get("title", "")):
+        if title_identity(item.title) != title_identity(catalog_title(entry.fields)):
             errors.append(f"catalog and BibTeX titles differ for {key}")
         keywords = tuple(
             part.strip()
@@ -332,6 +369,17 @@ def validate_library(root: Path, *, compile_catalog: bool = True) -> ValidationR
             errors.append(f"pending entry {key} must not link to a local file")
         if not file_value and item.attachment_format is not None:
             errors.append(f"pending entry {key} must not show a local attachment link")
+        url_value = entry.fields.get("url", "").strip()
+        if not is_audiovisual(entry.entry_type):
+            if item.url is not None or item.url_label:
+                errors.append(f"only audio and video entries show a [URL] link: {key}")
+        elif url_value:
+            if item.url != url_value:
+                errors.append(f"catalog URL link and BibTeX url differ for {key}")
+            if not item.url_label:
+                errors.append(f"audiovisual entry {key} must show a [URL] link")
+        elif item.url is not None or item.url_label:
+            errors.append(f"audiovisual entry {key} shows a [URL] link without a url")
 
     disk_paths, disk_errors = _disk_media(root)
     errors.extend(disk_errors)
@@ -399,7 +447,8 @@ def main() -> int:
         print(f"Validation failed with {len(result.errors)} error(s).", file=sys.stderr)
         return 1
     checks = (
-        "catalog semantics, canonical names, unique keys/DOIs/content, media formats"
+        "catalog semantics, canonical names, unique keys/DOIs/ISBNs/identifiers/"
+        "content, media formats"
     )
     if not args.no_compile:
         checks += ", and Typst compilation"

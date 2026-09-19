@@ -19,10 +19,12 @@ from paperlib.bibtex import (  # noqa: E402
     BibtexError,
     parse_bibliography,
     plain_text,
+    split_names,
 )
 
 RIS_TYPES = {
     "article": "JOUR",
+    "audio": "SOUND",
     "book": "BOOK",
     "booklet": "BOOK",
     "conference": "CPAPER",
@@ -32,6 +34,8 @@ RIS_TYPES = {
     "manual": "GEN",
     "mastersthesis": "THES",
     "misc": "GEN",
+    "movie": "MPCT",
+    "music": "SOUND",
     "online": "ELEC",
     "patent": "PAT",
     "periodical": "JOUR",
@@ -41,6 +45,7 @@ RIS_TYPES = {
     "techreport": "RPRT",
     "thesis": "THES",
     "unpublished": "UNPB",
+    "video": "VIDEO",
 }
 
 
@@ -109,38 +114,6 @@ def split_top_level(value: str, separator: str) -> list[str]:
     return pieces
 
 
-def split_authors(value: str) -> list[str]:
-    pieces: list[str] = []
-    start = 0
-    depth = 0
-    escaped = False
-    index = 0
-    while index < len(value):
-        character = value[index]
-        if escaped:
-            escaped = False
-            index += 1
-            continue
-        if character == "\\":
-            escaped = True
-            index += 1
-            continue
-        if character == "{":
-            depth += 1
-        elif character == "}":
-            depth = max(0, depth - 1)
-        elif depth == 0:
-            conjunction = re.match(r"\s+and\s+", value[index:])
-            if conjunction:
-                pieces.append(value[start:index])
-                index += conjunction.end()
-                start = index
-                continue
-        index += 1
-    pieces.append(value[start:])
-    return pieces
-
-
 def add_line(lines: list[str], tag: str, value: str | None) -> None:
     if value:
         lines.append(f"{tag}  - {value}")
@@ -151,9 +124,9 @@ def render_entry(entry: BibEntry) -> list[str]:
     lines = [f"TY  - {RIS_TYPES.get(entry.entry_type, 'GEN')}"]
     add_line(lines, "ID", entry.citation_key)
 
-    for author in split_authors(fields.get("author", "")):
+    for author in split_names(fields.get("author", "")):
         add_line(lines, "AU", plain_text(author))
-    for editor in split_authors(fields.get("editor", "")):
+    for editor in split_names(fields.get("editor", "")):
         add_line(lines, "ED", plain_text(editor))
 
     add_line(lines, "TI", plain_text(fields.get("title", "")))

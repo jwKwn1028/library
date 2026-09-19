@@ -30,10 +30,12 @@ For any request to add, organize, rename, or catalog papers or books:
    citation export. Supported library formats are PDF, EPUB, and MOBI.
 5. Retrieve missing BibTeX metadata from authoritative web sources as an agent
    task; do not add networking to the transactional intake script.
-6. Prepare one manifest per topic and review it with `scripts/intake-papers`
-   before using `--apply`. Repeat `--manifest` for one transactional
-   multi-topic batch. Optional `metadata_sources` and `--report-json` retain
-   provenance only in a private, Git-ignored JSON report.
+6. Inspect the existing taxonomy with `scripts/intake-papers topics --json`,
+   then prepare one manifest per topic and review it with
+   `scripts/intake-papers` before using `--apply`. Repeat `--manifest` for one
+   transactional multi-topic batch. Optional `metadata_sources` and reports
+   retain provenance only in private, Git-ignored JSON. Prefer `--report-base
+   reports/<name>` to retain separate dry-run and applied reports.
 7. Keep the private root `library.bib` and `main.typ` as the local sources of
    truth.
 8. Finish by running `scripts/validate-library.sh` and rebuilding the root-level
@@ -54,6 +56,12 @@ the future file. Every title retains that link; a local item also has a
 separate `[PDF]`, `[EPUB]`, or `[MOBI]` attachment link. Keep the explanation
 of missing local attachments in public documentation rather than displaying it
 inside the generated catalog.
+Keep a subtitle in its structured BibLaTeX field; catalog topic lists render
+it as `title: subtitle`.
+For numbered series, store the work title, series, and number separately; the
+catalog renders `series #number: title: subtitle`. Validate each edition's
+ISBN checksum, normalize new ISBN-10/13 input to an unseparated ISBN-13, and
+reject equivalent ISBN identities.
 
 List pending records with `scripts/intake-papers status --pending`. When one is
 downloaded, use an `attach: true` manifest item with its existing citation key;
@@ -61,6 +69,18 @@ the transaction connects the inspected file without duplicating or rewriting
 the record. Editor-only books are valid. The preferred manifest schema is
 `schemas/intake-manifest.schema.json`, and commands use the repository's
 advisory intake lock.
+
+For a request to add or look up albums or films, read
+`skills/music-film-intake/SKILL.md` and its music or film reference. Record an
+album as `@audio` and a film as `@movie`, keep it pending with an empty `file`
+field, and put the page to open in `url`; the catalog renders that as a
+separate `[URL]` link beside the References-linked title. Search and draft with
+`scripts/lookup-media music|film`, verify every drafted field, then finish
+through the ordinary `scripts/intake-papers` dry run and apply. Optional
+`musicbrainz`, `imdb`, and `wikidata` identifiers must be unique.
+`PAPER_LIBRARY_LOOKUP_CONTACT` may identify the user to MusicBrainz and
+Wikidata at runtime and must never be stored or printed. Local audio and video
+files are not supported yet.
 
 When the user requests downloads, use `scripts/fetch-pending --key KEY` as a
 network lookup dry run and repeat with `--apply` to stage accessible,

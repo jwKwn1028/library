@@ -20,20 +20,27 @@ import sys
 import tempfile
 import time
 from typing import Any
-from urllib.parse import urlsplit
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from paperlib.bibtex import (  # noqa: E402
+    IDENTIFIER_FIELDS,
     BibEntry,
     BibtexError,
+    catalog_title,
+    is_audiovisual,
     is_canonical_date,
     is_canonical_doi,
+    is_canonical_identifier,
+    is_safe_web_url,
+    is_valid_isbn,
     normalize_doi,
+    normalize_identifier,
+    normalize_isbn,
     parse_bibliography,
-    plain_text,
+    record_identity,
     replace_field_values,
     title_identity,
 )
@@ -143,16 +150,25 @@ def parse_args() -> argparse.Namespace:
         metavar="SECONDS",
         help="seconds to wait for the library lock (default: 5)",
     )
-    parser.add_argument(
+    report_group = parser.add_mutually_exclusive_group()
+    report_group.add_argument(
         "--report-json",
         type=Path,
         metavar="PATH",
-        help="write a private machine-readable intake report",
+        help="write one private report to this exact JSON path",
+    )
+    report_group.add_argument(
+        "--report-base",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "write PATH.dry-run.json or PATH.applied.json according to this run's phase"
+        ),
     )
     parser.add_argument(
         "--force-report",
         action="store_true",
-        help="replace an existing --report-json output",
+        help="replace an existing report output",
     )
     return parser.parse_args()
 
@@ -176,6 +192,19 @@ def parse_status_args(arguments: list[str]) -> argparse.Namespace:
     if not args.pending:
         parser.error("status currently requires --pending")
     return args
+
+
+def parse_topics_args(arguments: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog=f"{Path(sys.argv[0]).name} topics",
+        description="List the current catalog taxonomy and per-topic record counts",
+    )
+    parser.add_argument("--root", type=Path, default=Path.cwd())
+    parser.add_argument(
+        "--json", action="store_true", help="emit machine-readable JSON"
+    )
+    parser.add_argument("--lock-timeout", type=float, default=5.0, metavar="SECONDS")
+    return parser.parse_args(arguments)
 
 
 @contextmanager
@@ -382,10 +411,14 @@ class PlanState:
     existing_catalog: dict[str, list[CatalogItem]]
     existing_files: set[Path]
     existing_dois: set[str]
+    existing_isbns: set[str]
+    existing_identifiers: dict[str, set[str]]
     existing_titles: set[str]
     new_keys: set[str] = field(default_factory=set)
     touched_keys: set[str] = field(default_factory=set)
     new_dois: set[str] = field(default_factory=set)
+    new_isbns: set[str] = field(default_factory=set)
+    new_identifiers: dict[str, set[str]] = field(default_factory=dict)
     new_titles: set[str] = field(default_factory=set)
     new_sources: set[Path] = field(default_factory=set)
     new_targets: set[Path] = field(default_factory=set)
@@ -482,14 +515,7 @@ def parse_metadata_sources(raw_item: dict[str, Any], context: str) -> tuple[str,
         if not isinstance(value, str) or not value.strip():
             raise IntakeError(f"{source_context} must be a non-empty URL")
         source = value.strip()
-        parsed = urlsplit(source)
-        if (
-            parsed.scheme.casefold() not in {"http", "https"}
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or any(character.isspace() for character in source)
-        ):
+        if not is_safe_web_url(source):
             raise IntakeError(f"{source_context} must be an HTTP(S) URL")
         identity = source.casefold()
         if identity in seen:
@@ -579,6 +605,7 @@ def resolve_document(
 def parse_new_fields(
     raw_item: dict[str, Any],
     context: str,
+    entry_type: str,
     topic_parts: tuple[str, ...],
     pending: bool,
     target_file: Path | None,
@@ -613,6 +640,8 @@ def parse_new_fields(
             raise IntakeError(
                 f"duplicate BibTeX field name in {context}: {normalized_name}"
             )
+        if normalized_name == "isbn" and not isinstance(field_value, str):
+            raise IntakeError(f"{context}.fields.isbn must be a string")
         normalized_value = normalize_space(
             field_value, f"{context}.fields.{field_name}"
         )
@@ -644,6 +673,27 @@ def parse_new_fields(
             raise IntakeError(f"invalid DOI in {context}: {fields['doi']}")
         fields["doi"] = doi
         fields.setdefault("url", f"https://doi.org/{doi}")
+
+    isbn = fields.get("isbn")
+    if isbn:
+        if not is_valid_isbn(isbn):
+            raise IntakeError(f"invalid ISBN in {context}: {isbn}")
+        fields["isbn"] = normalize_isbn(isbn)
+
+    for name in IDENTIFIER_FIELDS:
+        if name not in fields:
+            continue
+        identifier = normalize_identifier(name, fields[name])
+        if not is_canonical_identifier(name, identifier):
+            raise IntakeError(f"invalid {name} identifier in {context}: {fields[name]}")
+        fields[name] = identifier
+
+    url = fields.get("url")
+    if url and is_audiovisual(entry_type) and not is_safe_web_url(url):
+        raise IntakeError(
+            f"{context}.fields.url must be an HTTP(S) URL without credentials; "
+            "it becomes the catalog [URL] link"
+        )
 
     fields["keywords"] = ", ".join(topic_parts)
     if pending:
@@ -712,21 +762,25 @@ def build_new_plan(
     entry_type = raw_item.get("entry_type", "article")
     if not isinstance(entry_type, str) or not ENTRY_TYPE_RE.fullmatch(entry_type):
         raise IntakeError(f"{context}.entry_type must contain letters only")
+    entry_type = entry_type.casefold()
     display_title, bib_title, fields = parse_new_fields(
         raw_item,
         context,
+        entry_type,
         state.topic_parts,
         pending,
         target_file,
         state.root,
     )
-    normalized_title = title_identity(bib_title)
-    if (
-        normalized_title in state.existing_titles
-        or normalized_title in state.new_titles
-    ):
+    identity = record_identity(entry_type, fields)
+    if identity in state.existing_titles or identity in state.new_titles:
+        if is_audiovisual(entry_type):
+            raise IntakeError(
+                "duplicate recording (same title, release year, and first "
+                f"creator): {display_title}"
+            )
         raise IntakeError(f"duplicate normalized title: {display_title}")
-    state.new_titles.add(normalized_title)
+    state.new_titles.add(identity)
 
     doi = fields.get("doi")
     if doi:
@@ -734,6 +788,22 @@ def build_new_plan(
         if doi_identity in state.existing_dois or doi_identity in state.new_dois:
             raise IntakeError(f"duplicate DOI: {doi}")
         state.new_dois.add(doi_identity)
+    isbn = fields.get("isbn")
+    if isbn:
+        if isbn in state.existing_isbns or isbn in state.new_isbns:
+            raise IntakeError(f"duplicate ISBN: {isbn}")
+        state.new_isbns.add(isbn)
+    for name in IDENTIFIER_FIELDS:
+        identifier = fields.get(name)
+        if not identifier:
+            continue
+        new_identifiers = state.new_identifiers.setdefault(name, set())
+        if (
+            identifier in state.existing_identifiers.get(name, set())
+            or identifier in new_identifiers
+        ):
+            raise IntakeError(f"duplicate {name} identifier: {identifier}")
+        new_identifiers.add(identifier)
     if target_file is not None:
         relative_target = target_file.relative_to(state.root).as_posix()
         if any(
@@ -749,8 +819,8 @@ def build_new_plan(
         source_file=source_file,
         target_file=target_file,
         citation_key=citation_key,
-        entry_type=entry_type.casefold(),
-        display_title=display_title,
+        entry_type=entry_type,
+        display_title=catalog_title(fields),
         fields=fields,
         sidecars=parse_sidecars(raw_item, context, state.root),
         metadata_sources=parse_metadata_sources(raw_item, context),
@@ -826,7 +896,7 @@ def build_attachment_plan(
         target_file=target_file,
         citation_key=citation_key,
         entry_type=entry.entry_type,
-        display_title=plain_text(fields.get("title", "")),
+        display_title=catalog_title(fields),
         fields=fields,
         sidecars=parse_sidecars(raw_item, context, state.root),
         metadata_sources=parse_metadata_sources(raw_item, context),
@@ -871,8 +941,22 @@ def parse_manifest(
             for entry in entries
             if entry.fields.get("doi", "").strip()
         },
+        existing_isbns={
+            normalize_isbn(entry.fields["isbn"])
+            for entry in entries
+            if entry.fields.get("isbn", "").strip()
+            and is_valid_isbn(entry.fields["isbn"])
+        },
+        existing_identifiers={
+            name: {
+                normalize_identifier(name, entry.fields[name])
+                for entry in entries
+                if entry.fields.get(name, "").strip()
+            }
+            for name in IDENTIFIER_FIELDS
+        },
         existing_titles={
-            title_identity(entry.fields["title"])
+            record_identity(entry.entry_type, entry.fields)
             for entry in entries
             if entry.fields.get("title", "").strip()
         },
@@ -918,6 +1002,8 @@ def render_bibtex(plan: ItemPlan) -> str:
         "author",
         "editor",
         "title",
+        "subtitle",
+        "series",
         "journaltitle",
         "booktitle",
         "date",
@@ -998,26 +1084,41 @@ def find_section_end(lines: list[str], start: int, level: int, limit: int) -> in
     return limit
 
 
+def catalog_url(plan: ItemPlan) -> str | None:
+    """Return the web page an album or film links to until it has local media."""
+
+    if not is_audiovisual(plan.entry_type):
+        return None
+    return plan.fields.get("url") or None
+
+
 def catalog_item(plan: ItemPlan, root: Path) -> list[str]:
     title_literal = json.dumps(plan.display_title, ensure_ascii=False)
-    if plan.pending:
-        return [
-            f"- #reference-title(<{plan.citation_key}>)[",
-            f"    #text({title_literal})",
-            f"  ] #h(0pt) @{plan.citation_key}",
-        ]
+    links: list[tuple[str, str]] = []
+    if not plan.pending:
+        assert plan.target_file is not None
+        links.append(
+            (
+                plan.target_file.relative_to(root).as_posix(),
+                plan.target_file.suffix.removeprefix(".").upper(),
+            )
+        )
+    url = catalog_url(plan)
+    if url:
+        links.append((url, "URL"))
 
-    assert plan.target_file is not None
-    relative_path = plan.target_file.relative_to(root).as_posix()
-    path_literal = json.dumps(relative_path, ensure_ascii=False)
-    attachment_format = plan.target_file.suffix.removeprefix(".").upper()
-    return [
+    lines = [
         f"- #reference-title(<{plan.citation_key}>)[",
         f"    #text({title_literal})",
-        f"  ] #h(0pt) #link({path_literal})[",
-        f'    #text(size: 8pt, weight: "bold")[\\[{attachment_format}\\]]',
-        f"  ] @{plan.citation_key}",
     ]
+    prefix = "  ] #h(0pt) "
+    for target, label in links:
+        target_literal = json.dumps(target, ensure_ascii=False)
+        lines.append(f"{prefix}#link({target_literal})[")
+        lines.append(f'    #text(size: 8pt, weight: "bold")[\\[{label}\\]]')
+        prefix = "  ] "
+    lines.append(f"{prefix}@{plan.citation_key}")
+    return lines
 
 
 def insert_catalog_items(
@@ -1187,6 +1288,18 @@ def preflight_batch_files(root: Path, topic_plans: list[TopicPlan]) -> None:
         hashes[plan.digest] = plan.source_file
 
 
+def phase_report_path(base: Path, *, applied: bool) -> Path:
+    """Return the non-colliding report path for a dry run or apply."""
+
+    name = base.name
+    if name.casefold().endswith(".json"):
+        name = name[:-5]
+    if not name:
+        raise IntakeError("--report-base must include a filename stem")
+    phase = "applied" if applied else "dry-run"
+    return base.with_name(f"{name}.{phase}.json")
+
+
 def resolve_report_path(
     requested: Path | None,
     *,
@@ -1196,7 +1309,7 @@ def resolve_report_path(
 ) -> Path | None:
     if requested is None:
         if force:
-            raise IntakeError("--force-report requires --report-json")
+            raise IntakeError("--force-report requires --report-json or --report-base")
         return None
     raw_path = requested.expanduser()
     candidate = raw_path if raw_path.is_absolute() else Path.cwd() / raw_path
@@ -1208,7 +1321,7 @@ def resolve_report_path(
         )
     report_path = absolute.resolve()
     if report_path.suffix.casefold() != ".json":
-        raise IntakeError("--report-json output must end in .json")
+        raise IntakeError("report output must end in .json")
     if report_path in protected_paths:
         raise IntakeError(f"report output conflicts with an intake path: {report_path}")
     if report_path.exists():
@@ -1368,7 +1481,9 @@ def print_plan(
         print(f"DIR   {topic.topic_directory.relative_to(root)} (create if missing)")
         for plan in topic.items:
             print()
-            if plan.pending:
+            if plan.pending and is_audiovisual(plan.entry_type):
+                print("FILE  PENDING LOCAL PATH (empty BibTeX file field)")
+            elif plan.pending:
                 print("FILE  PENDING DOWNLOAD (empty BibTeX file field)")
             else:
                 assert plan.source_file is not None
@@ -1382,6 +1497,14 @@ def print_plan(
             print(f"TITLE {plan.display_title}")
             if "doi" in plan.fields:
                 print(f"DOI   {plan.fields['doi']}")
+            if "isbn" in plan.fields:
+                print(f"ISBN  {plan.fields['isbn']}")
+            for name in IDENTIFIER_FIELDS:
+                if name in plan.fields:
+                    print(f"ID    {name} {plan.fields[name]}")
+            url = catalog_url(plan)
+            if url:
+                print(f"LINK  [URL] {url}")
             for metadata_source in plan.metadata_sources:
                 print(f"META  {metadata_source}")
             for sidecar in plan.sidecars:
@@ -1553,8 +1676,10 @@ def pending_status(root: Path, *, as_json: bool) -> int:
         records.append(
             {
                 "citation_key": entry.citation_key,
-                "title": plain_text(entry.fields.get("title", "")),
+                "entry_type": entry.entry_type,
+                "title": catalog_title(entry.fields),
                 "doi": entry.fields.get("doi") or None,
+                "url": entry.fields.get("url") or None,
                 "topic": topic,
                 "expected_directory": str(Path(LIBRARY_DIRECTORY, *topic)),
             }
@@ -1572,6 +1697,66 @@ def pending_status(root: Path, *, as_json: bool) -> int:
     return 0
 
 
+def topic_status(root: Path, *, as_json: bool) -> int:
+    bib_path = root / "library.bib"
+    main_path = root / "main.typ"
+    if not bib_path.is_file() or not main_path.is_file():
+        raise IntakeError("the library root must contain library.bib and main.typ")
+    try:
+        entries = parse_bibliography(
+            bib_path.read_text(encoding="utf-8"), require_entries=False
+        )
+        catalog_items = parse_catalog(main_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, BibtexError, CatalogError) as error:
+        raise IntakeError(f"cannot read the catalog taxonomy: {error}") from error
+
+    catalog_by_key: dict[str, list[CatalogItem]] = {}
+    for item in catalog_items:
+        catalog_by_key.setdefault(item.citation_key, []).append(item)
+
+    topics: dict[tuple[str, ...], dict[str, Any]] = {}
+    for entry in entries:
+        if not entry.topic:
+            continue
+        topic = entry.topic
+        matching_items = catalog_by_key.get(entry.citation_key, [])
+        headings = (
+            matching_items[0].headings
+            if len(matching_items) == 1
+            and len(matching_items[0].headings) == len(topic)
+            else topic
+        )
+        record = topics.setdefault(
+            topic,
+            {
+                "path": "/".join(topic),
+                "headings": list(headings),
+                "records": 0,
+                "local_files": 0,
+                "pending": 0,
+                "directory": str(Path(LIBRARY_DIRECTORY, *topic)),
+            },
+        )
+        record["records"] += 1
+        if entry.fields.get("file", "").strip():
+            record["local_files"] += 1
+        else:
+            record["pending"] += 1
+
+    records = sorted(topics.values(), key=lambda record: str(record["path"]).casefold())
+    if as_json:
+        print(json.dumps(records, ensure_ascii=False, indent=2))
+    else:
+        print(f"Topics: {len(records)}")
+        for record in records:
+            readable = " / ".join(record["headings"])
+            print(
+                f"- {readable} [{record['path']}]: {record['records']} record(s), "
+                f"{record['local_files']} local, {record['pending']} pending"
+            )
+    return 0
+
+
 def run_status(arguments: list[str]) -> int:
     args = parse_status_args(arguments)
     root = args.root.expanduser().resolve()
@@ -1581,9 +1766,24 @@ def run_status(arguments: list[str]) -> int:
         return pending_status(root, as_json=args.json)
 
 
+def run_topics(arguments: list[str]) -> int:
+    args = parse_topics_args(arguments)
+    root = args.root.expanduser().resolve()
+    if not root.is_dir():
+        raise IntakeError(f"library root does not exist: {root}")
+    with library_lock(root, args.lock_timeout):
+        return topic_status(root, as_json=args.json)
+
+
 def run_manifest(args: argparse.Namespace) -> int:
     if args.write_template is not None:
-        if args.apply or args.delete_sidecars or args.report_json or args.force_report:
+        if (
+            args.apply
+            or args.delete_sidecars
+            or args.report_json
+            or args.report_base
+            or args.force_report
+        ):
             raise IntakeError(
                 "--write-template cannot be combined with apply, sidecar, or report options"
             )
@@ -1662,8 +1862,11 @@ def run_manifest(args: argparse.Namespace) -> int:
             *(plan.target_file for plan in plans if plan.target_file is not None),
             *(sidecar for plan in plans for sidecar in plan.sidecars),
         }
+        report_request = args.report_json
+        if args.report_base is not None:
+            report_request = phase_report_path(args.report_base, applied=args.apply)
         report_path = resolve_report_path(
-            args.report_json,
+            report_request,
             root=root,
             force=args.force_report,
             protected_paths=protected_paths,
@@ -1736,6 +1939,8 @@ def main() -> int:
         arguments = sys.argv[1:]
         if arguments[:1] == ["status"]:
             return run_status(arguments[1:])
+        if arguments[:1] == ["topics"]:
+            return run_topics(arguments[1:])
         return run_manifest(parse_args())
     except (BibtexError, CatalogError, IntakeError, MediaError, OSError) as error:
         print(f"ERROR: {error}", file=sys.stderr)

@@ -5,7 +5,8 @@ from __future__ import annotations
 import calendar
 from dataclasses import dataclass
 import re
-from typing import Iterable
+from typing import Iterable, Mapping
+from urllib.parse import urlsplit
 
 
 ENTRY_HEADER_RE = re.compile(r"@([A-Za-z]+)\s*\{")
@@ -14,6 +15,30 @@ KEY_RE = re.compile(r"[^,\s{}]+")
 TOPIC_MARKER_RE = re.compile(r"(?m)^% Topic:\s*(.+?)\s*$")
 DATE_RE = re.compile(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$")
 DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)
+ISBN_PREFIX_RE = re.compile(r"^ISBN(?:-1[03])?\s*:?\s*", re.IGNORECASE)
+ISBN_SEPARATOR_RE = re.compile(r"[\s\-\u2010\u2011\u2012\u2013\u2014\u2212]")
+NAME_SEPARATOR_RE = re.compile(r"\s+and\s+")
+# Albums use @audio or @music; films use @movie or @video.
+AUDIO_ENTRY_TYPES = frozenset({"audio", "music"})
+AUDIOVISUAL_ENTRY_TYPES = AUDIO_ENTRY_TYPES | {"movie", "video"}
+IDENTIFIER_FIELDS = ("imdb", "musicbrainz", "wikidata")
+IDENTIFIER_PATTERNS = {
+    "imdb": re.compile(r"^tt[0-9]{7,10}$"),
+    "musicbrainz": re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ),
+    "wikidata": re.compile(r"^Q[1-9][0-9]*$"),
+}
+IDENTIFIER_URL_PREFIXES = {
+    "imdb": re.compile(r"^https?://(?:(?:www|m)\.)?imdb\.com/title/", re.IGNORECASE),
+    "musicbrainz": re.compile(
+        r"^https?://(?:beta\.)?musicbrainz\.org/(?:release-group|recording)/",
+        re.IGNORECASE,
+    ),
+    "wikidata": re.compile(
+        r"^https?://(?:(?:www|m)\.)?wikidata\.org/(?:wiki|entity)/", re.IGNORECASE
+    ),
+}
 
 
 class BibtexError(RuntimeError):
@@ -243,6 +268,89 @@ def is_canonical_doi(value: str) -> bool:
     return normalize_doi(value) == value and DOI_RE.fullmatch(value) is not None
 
 
+def is_audiovisual(entry_type: str) -> bool:
+    """Return whether an entry type records an album or a film."""
+
+    return entry_type.casefold() in AUDIOVISUAL_ENTRY_TYPES
+
+
+def normalize_identifier(name: str, value: str) -> str:
+    """Reduce an IMDb, MusicBrainz, or Wikidata value or page URL to its ID."""
+
+    identifier = IDENTIFIER_URL_PREFIXES[name].sub("", value.strip())
+    identifier = re.split(r"[/?#]", identifier, maxsplit=1)[0]
+    return identifier.upper() if name == "wikidata" else identifier.casefold()
+
+
+def is_canonical_identifier(name: str, value: str) -> bool:
+    return IDENTIFIER_PATTERNS[name].fullmatch(value) is not None
+
+
+def is_safe_web_url(value: str) -> bool:
+    """Return whether *value* is an absolute, credential-free HTTP(S) URL."""
+
+    if not value or not value.isprintable() or " " in value:
+        return False
+    try:
+        parts = urlsplit(value)
+        hostname = parts.hostname
+        credentials = (parts.username, parts.password)
+    except ValueError:
+        return False
+    return (
+        parts.scheme.casefold() in {"http", "https"}
+        and bool(hostname)
+        and credentials == (None, None)
+    )
+
+
+def _compact_isbn(value: str) -> str:
+    isbn = ISBN_PREFIX_RE.sub("", value.strip())
+    return ISBN_SEPARATOR_RE.sub("", isbn).upper()
+
+
+def is_valid_isbn(value: str) -> bool:
+    """Return whether *value* has a valid ISBN-10 or ISBN-13 checksum."""
+
+    isbn = _compact_isbn(value)
+    if (
+        len(isbn) == 10
+        and isbn[:9].isdigit()
+        and (isbn[-1].isdigit() or isbn[-1] == "X")
+    ):
+        digits = [int(character) for character in isbn[:9]]
+        digits.append(10 if isbn[-1] == "X" else int(isbn[-1]))
+        return (
+            sum(weight * digit for weight, digit in zip(range(10, 0, -1), digits)) % 11
+            == 0
+        )
+    if len(isbn) == 13 and isbn.isdigit():
+        checksum = sum(
+            int(character) * (1 if index % 2 == 0 else 3)
+            for index, character in enumerate(isbn)
+        )
+        return checksum % 10 == 0
+    return False
+
+
+def normalize_isbn(value: str) -> str:
+    """Normalize a valid ISBN to an unseparated ISBN-13 identity.
+
+    Invalid input is compacted but otherwise returned unchanged so callers can
+    report the original record as invalid before using the result as identity.
+    """
+
+    isbn = _compact_isbn(value)
+    if not is_valid_isbn(isbn) or len(isbn) == 13:
+        return isbn
+    stem = f"978{isbn[:9]}"
+    weighted_sum = sum(
+        int(character) * (1 if index % 2 == 0 else 3)
+        for index, character in enumerate(stem)
+    )
+    return f"{stem}{(-weighted_sum) % 10}"
+
+
 def is_canonical_date(value: str, *, year_only: bool = False) -> bool:
     match = DATE_RE.fullmatch(value)
     if not match:
@@ -302,3 +410,65 @@ def title_identity(value: str) -> str:
     return "".join(
         character for character in plain_text(value).casefold() if character.isalnum()
     )
+
+
+def split_names(value: str) -> list[str]:
+    """Split a BibTeX name list on ``and`` separators outside braces."""
+
+    pieces: list[str] = []
+    start = 0
+    depth = 0
+    escaped = False
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if character == "\\":
+            escaped = True
+            index += 1
+            continue
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            conjunction = NAME_SEPARATOR_RE.match(value, index)
+            if conjunction:
+                pieces.append(value[start:index])
+                index = conjunction.end()
+                start = index
+                continue
+        index += 1
+    pieces.append(value[start:])
+    return pieces
+
+
+def record_identity(entry_type: str, fields: Mapping[str, str]) -> str:
+    """Return the normalized identity used to reject duplicate records.
+
+    Albums and films often reuse the title of a book, an earlier release, or a
+    remake, so an audiovisual identity also includes its medium, release year,
+    and first credited creator.
+    """
+
+    identity = title_identity(catalog_title(fields))
+    if not identity or not is_audiovisual(entry_type):
+        return identity
+    medium = "audio" if entry_type.casefold() in AUDIO_ENTRY_TYPES else "video"
+    year = (fields.get("date") or fields.get("year") or "").strip()[:4]
+    creator = split_names(fields.get("author") or fields.get("editor") or "")[0]
+    return f"{identity}|{medium}|{year}|{title_identity(creator)}"
+
+
+def catalog_title(fields: Mapping[str, str]) -> str:
+    """Return the plain-text title shown in the catalog topic list."""
+
+    title = plain_text(fields.get("title", ""))
+    subtitle = plain_text(fields.get("subtitle", ""))
+    work_title = f"{title}: {subtitle}" if subtitle else title
+    series = plain_text(fields.get("series", ""))
+    number = plain_text(fields.get("number", ""))
+    return f"{series} #{number}: {work_title}" if series and number else work_title

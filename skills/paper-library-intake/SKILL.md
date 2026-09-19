@@ -35,7 +35,12 @@ they are not safe to infer mechanically.
    its naming, classification, metadata, and duplicate rules before preparing
    the manifest. The preferred manifest also has a machine-readable schema at
    `../../schemas/intake-manifest.schema.json` from the repository root.
-5. Create one JSON manifest per destination subtopic. A pending item omits
+   Run `./scripts/intake-papers topics --json` to inspect the current taxonomy
+   and per-topic local/pending counts before creating a new path.
+5. Create one JSON manifest per destination subtopic. Keep subtitles and
+   numbered-series metadata structured. Supply one ISBN for the cataloged
+   edition; intake validates its checksum, normalizes new ISBN-10/13 values to
+   ISBN-13, and checks that identity for duplicates. A pending item omits
    `source_file` and `canonical_filename`; a local item requires both. Add
    optional `metadata_sources` HTTP(S) URLs to retain reviewed provenance in a
    private report. Prefer a temporary manifest outside the library. Generate a
@@ -45,9 +50,9 @@ they are not safe to infer mechanically.
    ./scripts/intake-papers --write-template /tmp/paper-intake.json
    ```
 
-6. Run a dry run and inspect every proposed move, source format, key, DOI, and
-   destination. Repeat `--manifest` to preflight several topics as one batch;
-   every manifest must pass before anything can be applied:
+6. Run a dry run and inspect every proposed move, source format, key, DOI,
+   ISBN, and destination. Repeat `--manifest` to preflight several topics as
+   one batch; every manifest must pass before anything can be applied:
 
    ```sh
    ./scripts/intake-papers \
@@ -59,7 +64,7 @@ they are not safe to infer mechanically.
    files to `Library/<topic.path>/` when present, creates that topic directory
    even for a pending-only manifest, appends normalized entries to
    `library.bib`, inserts titles linked to their individual bibliography
-   entries and,
+   entries (including structured subtitle and series labels when supplied) and,
    for local media, adds a separate bracketed format link without visible
    pending-status labels,
    runs `scripts/validate-library.sh`, and atomically rebuilds `Catalog.pdf` in
@@ -76,11 +81,13 @@ they are not safe to infer mechanically.
 8. Keep source sidecars by default. Add `--delete-sidecars` only when their
    removal is explicitly within scope; deletion occurs after successful
    validation and build and participates in rollback.
-9. When durable provenance is useful, add `--report-json
-   reports/<name>.json`. The report is private, Git-ignored, and written with
-   owner-only permissions. It records the reviewed plan and
+9. When durable provenance is useful, prefer `--report-base reports/<name>`.
+   The dry run writes `<name>.dry-run.json`, while the apply writes
+   `<name>.applied.json`, preserving both phases without an overwrite flag.
+   `--report-json PATH` remains available for one exact output path. Reports
+   are private, Git-ignored, owner-only, and include the reviewed plan and
    `metadata_sources`; an applied report is committed only after validation and
-   compilation pass. Use `--force-report` only to replace a known report.
+   compilation pass. Use `--force-report` only to replace a known phase report.
 
 ## Complete a pending record
 
@@ -138,6 +145,8 @@ documents. Keep `intake-papers` offline.
 
 ## Guardrails
 
+- Route albums and films to `music-film-intake`; they stay pending with a
+  catalog `[URL]` link, and the PDF fetcher ignores them.
 - Do not use the script to recategorize or rename already cataloged items.
 - An attachment manifest is the only routine update to an existing item.
 - Keep root `main.typ`, root `library.bib`, the entire `Library/` tree,

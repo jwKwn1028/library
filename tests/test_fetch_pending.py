@@ -182,6 +182,30 @@ class FetchPendingTests(unittest.TestCase):
             ("QuantumChemistry", "ElectronicStructure", "ExampleTheory"),
         )
 
+    def test_skips_pending_films_even_with_a_doi(self) -> None:
+        with (self.root / "library.bib").open("a", encoding="utf-8") as bibliography:
+            bibliography.write(
+                """
+% Topic: Film / ScienceFiction
+
+@movie{director2026synthetichorizon,
+  author   = {Director, Dana},
+  title    = {Synthetic Horizon},
+  date     = {2026-03-01},
+  doi      = {10.5240/0000-0000-0000-0000-0000-X},
+  url      = {https://watch.example.test/title/synthetic-horizon},
+  keywords = {Film, ScienceFiction},
+  file     = {}
+}
+"""
+            )
+
+        records = fetch_pending.load_pending_records(self.root)
+
+        self.assertEqual(
+            [record.citation_key for record in records], ["example2026pending"]
+        )
+
     def test_rejects_a_nonpending_requested_key(self) -> None:
         with self.assertRaisesRegex(
             fetch_pending.FetchError, "not a DOI-backed pending record"

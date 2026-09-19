@@ -5,19 +5,42 @@ import shutil
 import tempfile
 import unittest
 
+from paperlib.catalog import CatalogError, parse_catalog
 from paperlib.validation import validate_library
 
 
+FILM_URL = "https://watch.example.test/title/synthetic-horizon"
+RECORDING_BIBLIOGRAPHY = f"""% Topic: Film / ScienceFiction
+
+@movie{{director2026synthetichorizon,
+  author   = {{Director, Dana}},
+  title    = {{Synthetic Horizon}},
+  date     = {{2026-03-01}},
+  type     = {{Film}},
+  imdb     = {{tt0000000}},
+  wikidata = {{Q4115189}},
+  url      = {{{FILM_URL}}},
+  keywords = {{Film, ScienceFiction}},
+  file     = {{}}
+}}
+"""
+RECORDING_ITEM = (
+    "- #reference-title(<director2026synthetichorizon>)"
+    '[#text("Synthetic Horizon")] #h(0pt) '
+    f'#link("{FILM_URL}")[#text(size: 8pt, weight: "bold")[\\[URL\\]]] '
+    "@director2026synthetichorizon"
+)
+
 VALID_BIBLIOGRAPHY = """% Synthetic private bibliography.
 
-% Topic: PeripheralEsoteric / DigitalBooks
+% Topic: Literature / DigitalBooks
 
 @book{editor2024handbook,
   editor     = {Editor, Erin},
   title      = {Synthetic Handbook},
   date       = {2024},
   publisher  = {Example Press},
-  keywords   = {PeripheralEsoteric, DigitalBooks},
+  keywords   = {Literature, DigitalBooks},
   file       = {}
 }
 """
@@ -30,7 +53,7 @@ VALID_CATALOG = """#let bibliography-file = "library.bib"
   style: title-link-style,
 )
 
-= Peripheral & Esoteric
+= Literature
 
 == Digital Books
 
@@ -66,6 +89,110 @@ class SemanticValidationTests(unittest.TestCase):
 
         self.assertEqual(result.errors, ())
         self.assertEqual((result.entries, result.files, result.pending), (1, 0, 1))
+
+    def test_accepts_title_with_structured_subtitle(self) -> None:
+        bibliography = VALID_BIBLIOGRAPHY.replace(
+            "  date       = {2024},",
+            "  subtitle   = {A Structured Subtitle},\n  date       = {2024},",
+        )
+        catalog = VALID_CATALOG.replace(
+            "Synthetic Handbook", "Synthetic Handbook: A Structured Subtitle"
+        )
+        (self.root / "library.bib").write_text(bibliography, encoding="utf-8")
+        (self.root / "main.typ").write_text(catalog, encoding="utf-8")
+
+        result = self.validate()
+
+        self.assertEqual(result.errors, ())
+
+    def test_rejects_catalog_title_that_omits_structured_subtitle(self) -> None:
+        bibliography = VALID_BIBLIOGRAPHY.replace(
+            "  date       = {2024},",
+            "  subtitle   = {A Structured Subtitle},\n  date       = {2024},",
+        )
+        (self.root / "library.bib").write_text(bibliography, encoding="utf-8")
+
+        result = self.validate()
+
+        self.assertIn(
+            "catalog and BibTeX titles differ for editor2024handbook", result.errors
+        )
+
+    def test_accepts_structured_numbered_series_title(self) -> None:
+        bibliography = VALID_BIBLIOGRAPHY.replace(
+            "  date       = {2024},",
+            "  series     = {Synthetic Cycle},\n"
+            "  number     = {7},\n"
+            "  date       = {2024},",
+        )
+        catalog = VALID_CATALOG.replace(
+            "Synthetic Handbook", "Synthetic Cycle #7: Synthetic Handbook"
+        )
+        (self.root / "library.bib").write_text(bibliography, encoding="utf-8")
+        (self.root / "main.typ").write_text(catalog, encoding="utf-8")
+
+        result = self.validate()
+
+        self.assertEqual(result.errors, ())
+
+    def test_rejects_catalog_title_that_omits_numbered_series(self) -> None:
+        bibliography = VALID_BIBLIOGRAPHY.replace(
+            "  date       = {2024},",
+            "  series     = {Synthetic Cycle},\n"
+            "  number     = {7},\n"
+            "  date       = {2024},",
+        )
+        (self.root / "library.bib").write_text(bibliography, encoding="utf-8")
+
+        result = self.validate()
+
+        self.assertIn(
+            "catalog and BibTeX titles differ for editor2024handbook", result.errors
+        )
+
+    def test_rejects_invalid_isbn(self) -> None:
+        bibliography = VALID_BIBLIOGRAPHY.replace(
+            "  date       = {2024},",
+            "  isbn       = {978-0-000-00000-3},\n  date       = {2024},",
+        )
+        (self.root / "library.bib").write_text(bibliography, encoding="utf-8")
+
+        result = self.validate()
+
+        self.assertIn(
+            "entry editor2024handbook has an invalid ISBN: 978-0-000-00000-3",
+            result.errors,
+        )
+
+    def test_rejects_equivalent_isbn10_and_isbn13(self) -> None:
+        bibliography = VALID_BIBLIOGRAPHY.replace(
+            "  date       = {2024},",
+            "  isbn       = {0-000-00000-0},\n  date       = {2024},",
+        )
+        bibliography += """
+
+@book{example2025secondhandbook,
+  author     = {Example, Ada},
+  title      = {A Second Synthetic Handbook},
+  isbn       = {978-0-000-00000-2},
+  date       = {2025},
+  publisher  = {Example Press},
+  keywords   = {Literature, DigitalBooks},
+  file       = {}
+}
+"""
+        catalog = VALID_CATALOG.replace(
+            "#bibliography(",
+            "- #reference-title(<example2025secondhandbook>)["
+            '#text("A Second Synthetic Handbook")] #h(0pt) '
+            "@example2025secondhandbook\n\n#bibliography(",
+        )
+        (self.root / "library.bib").write_text(bibliography, encoding="utf-8")
+        (self.root / "main.typ").write_text(catalog, encoding="utf-8")
+
+        result = self.validate()
+
+        self.assertIn("duplicate ISBN: 9780000000002", result.errors)
 
     def test_rejects_pending_title_without_reference_link(self) -> None:
         catalog = VALID_CATALOG.replace(
@@ -162,7 +289,7 @@ class SemanticValidationTests(unittest.TestCase):
         )
 
     def test_revalidates_media_content_during_consistency_check(self) -> None:
-        relative = "Library/PeripheralEsoteric/DigitalBooks/SyntheticHandbook.pdf"
+        relative = "Library/Literature/DigitalBooks/SyntheticHandbook.pdf"
         destination = self.root / relative
         destination.parent.mkdir(parents=True)
         destination.write_bytes(b"not really a PDF")
@@ -195,7 +322,7 @@ class SemanticValidationTests(unittest.TestCase):
         )
 
     def test_rejects_local_item_without_bibliography_entry_title_link(self) -> None:
-        relative = "Library/PeripheralEsoteric/DigitalBooks/SyntheticHandbook.pdf"
+        relative = "Library/Literature/DigitalBooks/SyntheticHandbook.pdf"
         destination = self.root / relative
         destination.parent.mkdir(parents=True)
         destination.write_bytes(b"not really a PDF")
@@ -230,6 +357,129 @@ class SemanticValidationTests(unittest.TestCase):
         result = self.validate()
 
         self.assertEqual(result.errors, ())
+
+    def write_recording(self, bibliography: str, item: str) -> None:
+        catalog = VALID_CATALOG.replace(
+            "= Literature\n\n== Digital Books",
+            "= Film\n\n== Science Fiction",
+        ).replace(
+            '- #reference-title(<editor2024handbook>)[#text("Synthetic Handbook")] '
+            "#h(0pt) @editor2024handbook",
+            item,
+        )
+        (self.root / "library.bib").write_text(bibliography, encoding="utf-8")
+        (self.root / "main.typ").write_text(catalog, encoding="utf-8")
+
+    def test_accepts_pending_recording_with_matching_url_link(self) -> None:
+        self.write_recording(RECORDING_BIBLIOGRAPHY, RECORDING_ITEM)
+
+        result = self.validate()
+
+        self.assertEqual(result.errors, ())
+        self.assertEqual((result.entries, result.files, result.pending), (1, 0, 1))
+
+    def test_rejects_recording_url_link_drift(self) -> None:
+        self.write_recording(
+            RECORDING_BIBLIOGRAPHY,
+            RECORDING_ITEM.replace(FILM_URL, "https://watch.example.test/other"),
+        )
+        self.assertIn(
+            "catalog URL link and BibTeX url differ for director2026synthetichorizon",
+            self.validate().errors,
+        )
+
+        self.write_recording(
+            RECORDING_BIBLIOGRAPHY,
+            "- #reference-title(<director2026synthetichorizon>)"
+            '[#text("Synthetic Horizon")] #h(0pt) @director2026synthetichorizon',
+        )
+        self.assertIn(
+            "audiovisual entry director2026synthetichorizon must show a [URL] link",
+            self.validate().errors,
+        )
+
+        self.write_recording(
+            RECORDING_BIBLIOGRAPHY.replace(f"  url      = {{{FILM_URL}}},\n", ""),
+            RECORDING_ITEM,
+        )
+        self.assertIn(
+            "audiovisual entry director2026synthetichorizon shows a [URL] link "
+            "without a url",
+            self.validate().errors,
+        )
+
+    def test_rejects_url_link_on_a_document(self) -> None:
+        bibliography = VALID_BIBLIOGRAPHY.replace(
+            "  file       = {}", f"  url        = {{{FILM_URL}}},\n  file       = {{}}"
+        )
+        catalog = VALID_CATALOG.replace(
+            "#h(0pt) @editor2024handbook",
+            f'#h(0pt) #link("{FILM_URL}")[#text(size: 8pt)[\\[URL\\]]] '
+            "@editor2024handbook",
+        )
+        (self.root / "library.bib").write_text(bibliography, encoding="utf-8")
+        (self.root / "main.typ").write_text(catalog, encoding="utf-8")
+
+        self.assertIn(
+            "only audio and video entries show a [URL] link: editor2024handbook",
+            self.validate().errors,
+        )
+
+    def test_rejects_unsafe_noncanonical_and_duplicate_recording_fields(self) -> None:
+        second = (
+            RECORDING_BIBLIOGRAPHY.split("\n", 2)[2]
+            .replace("director2026synthetichorizon", "remaker2031synthetichorizon")
+            .replace("Director, Dana", "Remaker, Rae")
+            .replace("2026-03-01", "2031-05-01")
+            .replace("tt0000000", "https://www.imdb.com/title/tt0000001/")
+            .replace(FILM_URL, "ftp://files.example.test/film")
+        )
+        second_item = (
+            RECORDING_ITEM.replace(
+                "director2026synthetichorizon", "remaker2031synthetichorizon"
+            )
+            .replace(FILM_URL, "ftp://files.example.test/film")
+            .replace("[\\[URL\\]]", "[\\[MKV\\]]")
+        )
+        self.write_recording(
+            f"{RECORDING_BIBLIOGRAPHY}\n{second}", f"{RECORDING_ITEM}\n\n{second_item}"
+        )
+
+        errors = self.validate().errors
+
+        self.assertIn(
+            "entry remaker2031synthetichorizon has a non-canonical imdb identifier: "
+            "https://www.imdb.com/title/tt0000001/",
+            errors,
+        )
+        self.assertIn("duplicate wikidata identifier: Q4115189", errors)
+        self.assertIn(
+            "entry remaker2031synthetichorizon has an unsafe or non-HTTP(S) url",
+            errors,
+        )
+
+    def test_catalog_parser_separates_library_and_web_links(self) -> None:
+        catalog = (
+            "= Film\n\n"
+            "- #reference-title(<director2026synthetichorizon>)"
+            '[#text("Synthetic Horizon")] #h(0pt) '
+            '#link("Library/Film/SyntheticHorizon.mkv")[#text[\\[MKV\\]]] '
+            f'#link("{FILM_URL}")[#text(size: 8pt)[\\[URL\\]]] '
+            "@director2026synthetichorizon\n\n"
+            "#bibliography(bibliography-file) <references>\n"
+        )
+
+        item = parse_catalog(catalog)[0]
+
+        self.assertEqual(item.path, "Library/Film/SyntheticHorizon.mkv")
+        self.assertEqual(item.url, FILM_URL)
+        self.assertTrue(item.url_label)
+        with self.assertRaisesRegex(CatalogError, "at most one library-file link"):
+            parse_catalog(
+                catalog.replace(
+                    "Library/Film/SyntheticHorizon.mkv", "https://watch.example.test/"
+                )
+            )
 
     def test_rejects_impossible_canonical_date(self) -> None:
         bibliography = VALID_BIBLIOGRAPHY.replace(

@@ -14,6 +14,7 @@ agent-assisted document intake.
 - [Add a metadata-only reading list](#add-a-metadata-only-reading-list)
 - [Attach a downloaded pending item](#attach-a-downloaded-pending-item)
 - [Fetch accessible pending PDFs](#fetch-accessible-pending-pdfs)
+- [Add music and film records](#add-music-and-film-records)
 - [Manifest reference](#manifest-reference)
 - [What an apply operation does](#what-an-apply-operation-does)
 - [Private intake reports](#private-intake-reports)
@@ -93,7 +94,8 @@ document inspection. Framework development also requires Ruff and ShellCheck;
 `scripts/test` checks for them. The public `ruff.toml` selects the intended lint
 rules explicitly so local and hosted checks do not depend on Ruff's changing
 defaults. The semantic validator itself is Python-based and does not depend on
-GNU `find`, `sed`, or `sha256sum`.
+GNU `find`, `sed`, or `sha256sum`. Only the optional `fetch-pending` and
+`lookup-media` helpers need network access.
 
 Check the main tools before starting:
 
@@ -184,11 +186,13 @@ paper-library/
 │   ├── init-library
 │   ├── install-hooks
 │   ├── intake-papers
+│   ├── lookup-media
 │   ├── public-repo
 │   ├── stage-papers
 │   ├── test
 │   └── validate-library.sh
 ├── skills/
+│   ├── music-film-intake/    # albums and films as URL-linked pending records
 │   └── paper-library-intake/
 ├── styles/
 │   └── title-link.csl       # renders titles as entry-specific citation links
@@ -294,7 +298,21 @@ has no network behavior and consumes only the reviewed JSON manifest.
 Choose the narrowest existing directory that matches the item's primary
 contribution. Prefer an existing taxonomy over creating a category. Create a
 new PascalCase topic only when no clean existing fit exists, the subject is
-broader than one item, and the category is likely to recur.
+broader than one item, and the category is likely to recur. Keep books, films,
+and albums out of `Perspectives`, the catch-all for adjacent research: a book
+belongs under its subject topic or `Literature`, a film under `Film`, and an
+album under `Music`.
+
+Inspect the current taxonomy before deciding:
+
+```sh
+./scripts/intake-papers topics
+./scripts/intake-papers topics --json
+```
+
+Each result includes the canonical path, readable headings, total records,
+local-file count, pending count, and expected `Library/` directory. The command
+is read-only and uses the same advisory lock as intake.
 
 The library-file destination follows:
 
@@ -378,7 +396,7 @@ A synthetic manifest looks like this:
         "publisher": "Publisher Name",
         "date": "2026",
         "edition": "2",
-        "isbn": "978-0-00-000000-0"
+        "isbn": "978-0-000-00000-2"
       },
       "sidecars": ["Inbox/downloaded-citation.bib"]
     }
@@ -405,7 +423,7 @@ against current library state and one another before any apply can begin:
 ```sh
 ./scripts/intake-papers \
   --manifest /tmp/quantum-chemistry.json \
-  --manifest /tmp/peripheral-esoteric.json
+  --manifest /tmp/perspectives.json
 ```
 
 Without `--apply`, no library file is changed. Review every printed value:
@@ -415,6 +433,9 @@ Without `--apply`, no library file is changed. Review every printed value:
 - citation key;
 - official display title;
 - DOI, when present;
+- normalized ISBN-13, when present;
+- normalized `imdb`, `musicbrainz`, and `wikidata` identifiers (`ID` lines);
+- the `[URL]` link target of an album or film (`LINK` line);
 - metadata provenance URLs, when present;
 - sidecar disposition;
 - topic path and readable heading hierarchy;
@@ -435,7 +456,7 @@ The multi-topic form is also one transaction:
 ```sh
 ./scripts/intake-papers \
   --manifest /tmp/quantum-chemistry.json \
-  --manifest /tmp/peripheral-esoteric.json \
+  --manifest /tmp/perspectives.json \
   --apply
 ```
 
@@ -461,16 +482,23 @@ To use another root-level output filename:
 The custom output must be a filename ending in `.pdf`, not a path containing
 directories.
 
-To retain a private, machine-readable record, add a report to either the
-dry-run or apply command:
+To retain both review phases without overwriting either, use one report base on
+the dry run and repeat it on apply:
 
 ```sh
 ./scripts/intake-papers \
   --manifest /tmp/paper-intake.json \
-  --report-json reports/paper-intake.json
+  --report-base reports/paper-intake
+
+./scripts/intake-papers \
+  --manifest /tmp/paper-intake.json \
+  --apply \
+  --report-base reports/paper-intake
 ```
 
-An existing report is not replaced unless `--force-report` is explicit.
+This creates `paper-intake.dry-run.json` and `paper-intake.applied.json`.
+`--report-json PATH` remains available when one exact output path is desired.
+An existing phase report is not replaced unless `--force-report` is explicit.
 
 ### 8. Review the result
 
@@ -540,15 +568,15 @@ Run the same dry-run and apply commands used for local documents. The plan
 prints `FILE PENDING DOWNLOAD`. A successful apply:
 
 - adds the verified record to `library.bib` with `file = {}`;
-- adds its title and citation key to `main.typ`, linking the title to the
-  References section;
+- adds its title and citation key to `main.typ`, linking the title to its
+  individual bibliography entry;
 - adds no visible pending-status label to the catalog;
 - creates the empty `Library/<topic.path>/` destination directory but no
   placeholder media file; and
 - validates and rebuilds the catalog transactionally.
 
 Empty file values are intentional state, not broken links. Duplicate key, DOI,
-and normalized-title checks still apply.
+ISBN, and normalized-catalog-title checks still apply.
 
 List outstanding downloads at any time:
 
@@ -681,6 +709,118 @@ reviewed `attach: true` manifest with a canonical filename. The attachment
 transaction then moves the document, updates the empty `file` field and catalog
 link, validates the library, and rebuilds `Catalog.pdf`.
 
+## Add music and film records
+
+Albums and films are ordinary bibliography records that stay pending: the
+BibTeX `file` field is empty until a local copy exists, and the record's `url`
+becomes a bracketed `[URL]` link beside the catalog title. The title still
+opens the record's References entry. Local audio and video files are not yet
+supported as attachments, so these records have no attachment step.
+
+Use `@audio` with `type = {Album}` (or `EP`, `Single`) for an album and
+`@movie` with `type = {Film}` for a film; the engine also treats `@music` and
+`@video` as audiovisual. Put the credited artist or the directors in `author`,
+because Typst omits an `editor`-only director from a film's reference. The
+`music-film-intake` skill documents the full conventions and source priority.
+
+### Look up metadata
+
+The read-only helper searches MusicBrainz release groups and Wikidata films:
+
+```sh
+./scripts/lookup-media music "Album Title" --artist "Artist Name"
+./scripts/lookup-media film "Film Title" --year 2026 --director "Name"
+```
+
+Draft one record from the chosen identifier or its page URL:
+
+```sh
+./scripts/lookup-media music --id MUSICBRAINZ-RELEASE-GROUP-ID
+./scripts/lookup-media film --id WIKIDATA-QID --language ko
+```
+
+The draft is a complete pending manifest item with a suggested citation key,
+normalized fields, `metadata_sources`, and a `url`. It also lists alternative
+links and review notes, such as a year-only date, several credited artists, a
+key collision, or an identifier already in the library. By default the `url`
+is a streaming or watch page when one is known; `--link reference` prefers a
+stable reference page instead. For films, `--language` selects the title: `en`
+by default, another Wikidata language code, or `original`. YouTube videos
+shorter than 90% of the film's runtime, usually trailers or partial uploads,
+are listed but never selected. `--json` prints machine-readable output.
+
+The helper writes nothing and paces MusicBrainz requests to its limit of one
+per second. Both services ask clients to identify a contact; supply one only
+in the runtime environment:
+
+```sh
+PAPER_LIBRARY_LOOKUP_CONTACT="$CONTACT_URL_OR_EMAIL" \
+  ./scripts/lookup-media music "Album Title"
+```
+
+The value is sent only in the request User-Agent and is never printed or
+stored.
+
+### Review, dry-run, and apply
+
+A synthetic album manifest looks like this:
+
+```json
+{
+  "topic": {
+    "path": "Music/Jazz",
+    "headings": ["Music", "Jazz"]
+  },
+  "items": [
+    {
+      "pending": true,
+      "citation_key": "example2026syntheticsessions",
+      "entry_type": "audio",
+      "title": "Synthetic Sessions",
+      "metadata_sources": [
+        "https://musicbrainz.org/release-group/00000000-0000-4000-8000-000000000001"
+      ],
+      "fields": {
+        "author": "{Example Ensemble}",
+        "date": "2026-01-15",
+        "publisher": "Example Records",
+        "type": "Album",
+        "musicbrainz": "00000000-0000-4000-8000-000000000001",
+        "url": "https://music.example.org/album/synthetic-sessions"
+      }
+    }
+  ]
+}
+```
+
+Run the same dry-run and apply commands as for documents. The plan prints
+`FILE  PENDING LOCAL PATH`, one `ID` line per normalized identifier, and
+`LINK  [URL] <url>`. A successful apply adds the record with `file = {}`,
+creates `Library/<topic.path>/`, inserts the title and its `[URL]` link, and
+validates and rebuilds the catalog in the same transaction.
+
+Rules specific to albums and films:
+
+- `url` must be an absolute HTTP(S) URL without credentials; remove tracking
+  parameters such as `si` or `utm_*`. Other record types never show `[URL]`,
+  even when they have a `url`.
+- `musicbrainz` (an album's release-group or a song's recording ID), `imdb`
+  (`tt…`), and `wikidata` (`Q…`) accept bare IDs or page URLs. Intake stores
+  bare IDs and rejects an identifier already used by another record.
+- A song is `@audio` with `type = {Song}` and its album in `booktitle`; Typst's
+  APA style omits the album, but other BibLaTeX styles and reference managers
+  use it. `lookup-media` drafts albums, not songs.
+- Duplicate detection combines the normalized title with the medium, release
+  year, and first creator. A film may share a novel's title, a remake its
+  original's, and a soundtrack its film's.
+- Prefer a full `YYYY-MM-DD` release date: Typst's APA style renders a
+  year-only audiovisual date as `(2026,)`.
+- File albums under `Music` and films under `Film`, never under
+  `Perspectives`.
+
+`scripts/fetch-pending` ignores albums and films, even when a film carries an
+EIDR DOI.
+
 ## Manifest reference
 
 Top-level keys:
@@ -707,7 +847,7 @@ Item keys:
 | `canonical_filename` | unless pending | ASCII PascalCase with a matching lowercase supported extension |
 | `citation_key` | yes | Lowercase `firstauthorYYYYshorttitle` form |
 | `entry_type` | no | Letters only; defaults to `article` |
-| `title` | yes | Plain Unicode display title for `main.typ` |
+| `title` | yes | Plain Unicode work title; structured subtitle and numbered-series fields are added to the catalog label |
 | `bib_title` | no | BibTeX title with capitalization braces if needed |
 | `metadata_sources` | no | Unique HTTP(S) URLs used to verify metadata; retained only in reports |
 | `fields` | yes | Reviewed BibTeX fields |
@@ -740,11 +880,24 @@ Field rules:
 - dates use `YYYY`, `YYYY-MM`, or `YYYY-MM-DD`, and a supplied `year` must
   agree with `date`;
 - `title`, `keywords`, and `file` are reserved and cannot appear in `fields`;
+- `subtitle` remains a separate BibLaTeX field and is displayed as
+  `title: subtitle` in the catalog topic list;
+- a numbered series uses the individual work in `title`, its collection in
+  `series`, and its sequence in `number`; the catalog displays
+  `series #number: title: subtitle`, omitting absent segments;
 - field names begin with a letter and contain only letters, numbers,
   underscores, or hyphens;
 - field values are normalized to single spaces and must have balanced braces;
 - a DOI can be supplied bare, with a `doi:` prefix, or as a DOI URL;
 - the engine stores a bare DOI and adds its URL when `url` is absent;
+- one ISBN-10 or ISBN-13 may identify the cataloged edition; its checksum must
+  be valid, new intake stores it as an unseparated ISBN-13, and equivalent
+  ISBN-10/13 values are rejected as duplicates;
+- optional `musicbrainz` (release group or recording), `imdb`, and `wikidata`
+  values accept bare IDs or page URLs, are stored as bare IDs, and must be
+  unique;
+- for `audio`, `music`, `movie`, and `video` records, `url` must be a
+  credential-free HTTP(S) URL and becomes the catalog `[URL]` link;
 - `keywords` and `file` are generated. Local items receive the reviewed
   `Library/<topic.path>/<canonical_filename>` destination; pending items
   receive an empty `file` value.
@@ -773,8 +926,9 @@ An apply is transactional across every repeated `--manifest` argument:
 6. catalog headings with the same normalized identity are found, or the
    supplied naturally cased headings are created before the bibliography block;
 7. every title links to its individual entry in References; local items also receive a
-   `[PDF]`, `[EPUB]`, or `[MOBI]` attachment link, and citation keys are
-   inserted without visible pending-status labels;
+   `[PDF]`, `[EPUB]`, or `[MOBI]` attachment link, albums and films with a
+   `url` receive a separate `[URL]` link, and citation keys are inserted
+   without visible pending-status labels;
 8. the quoted private `catalog-updated` value is set to the current local date;
 9. writes to the two text sources are atomic;
 10. `scripts/validate-library.sh` runs;
@@ -789,17 +943,20 @@ the snapshotted files, moves library files back, removes newly created empty
 directories, and reports the concrete error. Treat a rollback message as an
 incomplete intake and resolve the underlying cause before retrying.
 
-The lock also covers dry runs and pending-status reads. It waits five seconds
-by default; `--lock-timeout SECONDS` accepts a finite non-negative override.
+The lock also covers dry runs, pending-status reads, and taxonomy reads. It
+waits five seconds by default; `--lock-timeout SECONDS` accepts a finite
+non-negative override.
 The script is designed for new intake and pending attachment, not bulk
 recategorization or mass-renaming of existing items.
 
 ## Private intake reports
 
-`--report-json PATH` writes deterministic UTF-8 JSON for the reviewed run. A
-dry-run report has `status: "dry-run"` and leaves the library unchanged. An
-apply report has `status: "applied"` and records that validation and catalog
-compilation passed. It includes:
+Prefer `--report-base PATH`. The dry run writes `PATH.dry-run.json`; apply
+writes `PATH.applied.json`, so both provenance phases survive without
+`--force-report`. A dry-run report has `status: "dry-run"` and leaves the
+library unchanged. An apply report has `status: "applied"` and records that
+validation and catalog compilation passed. `--report-json PATH` retains the
+single exact-path behavior. Every report includes:
 
 - every manifest and topic;
 - action, citation key, title, normalized fields, and pending state;
@@ -812,7 +969,7 @@ Reports may be written outside the repository when their parent directory
 already exists. A report inside the repository must be beneath `reports/` or
 end in `.intake-report.json`, ensuring that the repository's ignore rules cover
 it. The command refuses symlink outputs, collisions with intake files, and
-existing reports unless `--force-report` is supplied. Symlinked parent
+existing phase reports unless `--force-report` is supplied. Symlinked parent
 directories are refused as well. Reports contain private
 bibliographic and filesystem data, are created with mode `0600`, must not be
 force-added, and are not a source of truth. During apply, report creation joins
@@ -833,8 +990,9 @@ The exporter:
 
 - reads `library.bib` without modifying it;
 - writes UTF-8 RIS with CRLF line endings;
-- maps articles, books, chapters, conference papers, theses, reports, and other
-  common BibTeX entry types to RIS types;
+- maps articles, books, chapters, conference papers, theses, reports, albums
+  (`SOUND`), films (`MPCT`, or `VIDEO` for `@video`), and other common BibTeX
+  entry types to RIS types;
 - preserves citation keys as `ID`, authors and editors, publication fields,
   DOI/URL values, and taxonomy keywords;
 - includes both local and pending records; and
@@ -880,7 +1038,9 @@ Run the complete consistency gate from the repository root:
 It checks:
 
 - a structurally valid bibliography with unique, correctly formed keys, DOI
-  values, and normalized titles;
+  values, and normalized titles (for albums and films, the title plus medium,
+  release year, and first creator);
+- canonical, unique `musicbrainz`, `imdb`, and `wikidata` identifiers;
 - one title, author or editor, canonical date/year, topic marker, `keywords`,
   and `file` field per record;
 - exact agreement among `% Topic:` markers, keyword paths, physical topic
@@ -890,6 +1050,8 @@ It checks:
 - a References-section title link for every record, plus an exact,
   correctly-labeled media link for every local record and no attachment or
   visible status label for pending records;
+- exactly one `[URL]` link to its safe HTTP(S) `url` for every album or film
+  that has one, and no `[URL]` link on any other record;
 - canonical, safe, non-symlink paths rooted at `Library/` and an exact match
   between bibliography paths and all on-disk PDF/EPUB/MOBI files;
 - actual PDF, EPUB, and MOBI signatures/containers on every validation run;
@@ -993,7 +1155,9 @@ access the first time Typst resolves them.
 
 `AGENTS.md` is the authoritative repository policy for compatible coding
 agents. `CLAUDE.md` directs Claude Code to the same policy. The reusable intake
-skill lives at `skills/paper-library-intake/`.
+skill lives at `skills/paper-library-intake/`; albums and films use
+`skills/music-film-intake/`, for example with "Use $music-film-intake to add
+this album with a listening link."
 
 A useful request is:
 
@@ -1170,14 +1334,18 @@ files.
 | `scripts/stage-papers PATH... --apply` | Copy verified media into `Inbox/` while preserving originals | Adds private inbox copies |
 | `scripts/intake-papers --write-template PATH` | Write a starter JSON manifest | Writes only the requested new path |
 | `scripts/intake-papers status --pending [--json]` | List records awaiting documents | No |
+| `scripts/intake-papers topics [--json]` | List taxonomy paths, headings, and local/pending counts | No |
 | `scripts/intake-papers --manifest PATH` | Validate and print an intake plan | No |
 | repeated `--manifest PATH` arguments | Preflight or apply several topics as one transaction | Follows dry-run or apply mode |
 | `scripts/intake-papers --manifest PATH --apply` | Apply, validate, and build transactionally | Yes |
 | `scripts/intake-papers --manifest PATH --report-json PATH` | Write a private dry-run provenance report | Writes only the report |
 | `scripts/intake-papers --manifest PATH --apply --report-json PATH` | Apply and write a private success report after validation/build | Yes |
+| `scripts/intake-papers --manifest PATH --report-base PATH` | Write phase-specific `.dry-run.json` or `.applied.json` provenance | Dry run writes only its report; apply mutates library data |
 | attachment manifest with `--apply` | Connect a document to one pending record | Yes |
 | `scripts/intake-papers --manifest PATH --apply --delete-sidecars` | Apply and remove listed sidecars after success | Yes |
 | `scripts/intake-papers --manifest PATH --output NAME.pdf --apply` | Build a custom root-level catalog filename | Yes |
+| `scripts/lookup-media music\|film QUERY` | Search MusicBrainz albums or Wikidata films | No |
+| `scripts/lookup-media music\|film --id ID` | Print a draft pending manifest item for review | No |
 | `scripts/validate-library.sh` | Check the complete private library and Typst build | No persistent output |
 | `scripts/test` | Run the complete framework and private-state gate | No persistent output |
 | `scripts/public-repo audit` | Audit publishable files, index, and history | No |
@@ -1190,6 +1358,8 @@ Use built-in help for current command syntax:
 ./scripts/stage-papers --help
 ./scripts/intake-papers --help
 ./scripts/intake-papers status --help
+./scripts/lookup-media music --help
+./scripts/lookup-media film --help
 ./scripts/public-repo --help
 ./scripts/public-repo export --help
 ```
@@ -1219,7 +1389,7 @@ orphan validation.
 Choose a new private report path, or inspect the existing report and repeat the
 command with `--force-report` only when replacing it is intentional.
 
-### Duplicate DOI, title, key, path, or content
+### Duplicate DOI, ISBN, title, key, path, or content
 
 Do not work around the check by changing arbitrary metadata. Determine whether
 the incoming document is an existing item, a distinct version, a correction,
@@ -1299,6 +1469,19 @@ git config --local --get core.hooksPath
 
 The result should be `.githooks`.
 
+### `duplicate recording (same title, release year, and first creator)`
+
+The library already has an album or film with that title, medium, year, and
+first creator. Check whether it is the same work before changing anything; for
+a genuinely different release, confirm its title, date, and credits against
+the sources rather than editing them to pass.
+
+### `lookup-media` reports HTTP 403, 429, or 503
+
+The service is refusing or throttling requests. The helper retries twice after
+429 or 503. Wait before retrying, keep lookups serial, and set
+`PAPER_LIBRARY_LOOKUP_CONTACT` so the service can identify the client.
+
 ### Bibliography export already exists
 
 The exporter does not overwrite by default. Review the existing RIS file, then
@@ -1335,6 +1518,10 @@ Preserve these rules when extending the framework:
 - `examples/references.bib` remains synthetic and has no local `file` or
   taxonomy `keywords` fields;
 - the intake engine remains offline and manifest-driven;
+- `scripts/lookup-media` stays networked, read-only, and separate from the
+  engine, and never prints or stores the runtime lookup contact;
+- the catalog `[URL]` link derives only from an audio or video record's `url`,
+  and those records stay pending until local audio and video are supported;
 - the shared `paperlib/` parser and media checks remain the single
   interpretation used by intake, export, and validation;
 - pending attachment changes only an existing empty `file` field and adds a

@@ -8,7 +8,9 @@ Read this reference before constructing an intake manifest.
   PDF/EPUB/MOBI metadata or identifier text. Prefer the title page when sources
   conflict.
 - Classify by the item's primary contribution in the narrowest clean existing
-  directory. Prefer domain-specific folders over generic ones.
+  directory. Prefer domain-specific folders over generic ones. Never file a
+  book, film, or album under `Perspectives`, the catch-all for adjacent
+  research; a book belongs under its subject topic or `Literature`.
 - Create a category only when no existing directory fits, the topic is broader
   than one item, and it is likely to recur or already has a peer item. Use a
   concise PascalCase topic name and mention the new category in the report.
@@ -91,7 +93,7 @@ bibliography, catalog, filesystem, and media contents.
         "publisher": "Publisher Name",
         "date": "2026",
         "edition": "2",
-        "isbn": "978-0-00-000000-0"
+        "isbn": "978-0-000-00000-2"
       },
       "sidecars": ["Inbox/downloaded-citation.bib"]
     }
@@ -175,8 +177,12 @@ Rules:
   all metadata properties. Its manifest topic must match the record's existing
   `% Topic:` path. The engine preserves the key and metadata while updating the
   existing `file` field and catalog item.
-- `title` is plain Unicode used in `main.typ`. Use optional `bib_title` only
-  when BibTeX capitalization braces are needed.
+- `title` is the plain Unicode main title. Use optional `bib_title` only when
+  BibTeX capitalization braces are needed. When `fields.subtitle` is present,
+  the topic list displays `title: subtitle` while retaining the two structured
+  BibLaTeX fields. For a numbered series, keep the individual work in `title`,
+  the series in `fields.series`, and its sequence in `fields.number`; the topic
+  list displays `series #number: title: subtitle` with absent segments omitted.
 - At least one of `fields.author` or `fields.editor`, plus either `fields.date`
   or `fields.year`, is required. Dates use `YYYY`, `YYYY-MM`, or `YYYY-MM-DD`;
   if both date and year are supplied, their years must agree. Supply accurate
@@ -184,6 +190,18 @@ Rules:
   Both authored and editor-only books can use `entry_type: book`.
 - DOI values may be bare identifiers or DOI URLs; the script stores them as
   bare identifiers and adds a DOI URL when `url` is absent.
+- Supply at most one ISBN-10 or ISBN-13 for the cataloged edition. The engine
+  checks its checksum, stores new input as an unseparated ISBN-13, and treats
+  equivalent ISBN-10 and ISBN-13 values as one duplicate identity. Existing
+  valid formatted ISBN values remain accepted by validation.
+- Optional `musicbrainz` (release group or recording), `imdb`, and `wikidata`
+  fields accept bare IDs or their page URLs. The engine stores bare IDs and
+  rejects an identifier already used by another record.
+- Audio (`audio`, `music`) and video (`movie`, `video`) entry types follow
+  `skills/music-film-intake`. Their optional `fields.url` must be a
+  credential-free HTTP(S) URL and becomes a separate `[URL]` catalog link;
+  other entry types never receive one. Their duplicate identity is the
+  normalized catalog title plus medium, release year, and first creator.
 - `keywords` and `file` are generated; do not put them in `fields`. A
   local item receives `Library/<topic.path>/<canonical_filename>`, while a
   pending item receives an empty `file` value.
@@ -196,9 +214,10 @@ Rules:
 - Unknown top-level, topic, or item properties are rejected so misspelled
   fields cannot be silently ignored. `$schema` is the only optional top-level
   annotation.
-- Dry runs, status reads, and applies hold `.paper-library.lock`. A concurrent
-  operation fails after the finite `--lock-timeout` instead of losing an
-  update.
+- Dry runs, status/topic reads, and applies hold `.paper-library.lock`. A
+  concurrent operation fails after the finite `--lock-timeout` instead of
+  losing an update. Run `scripts/intake-papers topics --json` before
+  classification to discover current paths, readable headings, and counts.
 
 ## External staging and provenance reports
 
@@ -226,15 +245,16 @@ optionally through the runtime `PAPER_LIBRARY_PROXY_PREFIX`, and
 manifest. `intake-papers` remains offline and is the only command that changes
 canonical bibliography/catalog state.
 
-Pass `--report-json reports/<name>.json` to write a machine-readable, private
-record of a dry run or successful apply. Reports include manifests, topics,
-actions, normalized fields, metadata source URLs, source and destination paths,
-hashes, sidecar dispositions, and validation/build status. They are
-Git-ignored, created with owner-only permissions, and are not a bibliography or
-catalog source of truth. Existing reports are protected unless
-`--force-report` is explicit. A report produced during apply participates in
-rollback and is written only after library validation and catalog compilation
-succeed.
+Prefer `--report-base reports/<name>` for a machine-readable, private record of
+both phases: it writes `<name>.dry-run.json` during review and
+`<name>.applied.json` during apply. `--report-json PATH` retains the legacy
+single exact-path behavior. Reports include manifests, topics, actions,
+normalized fields, metadata source URLs, source and destination paths, hashes,
+sidecar dispositions, and validation/build status. They are Git-ignored,
+created with owner-only permissions, and are not a bibliography or catalog
+source of truth. Existing phase outputs are protected unless `--force-report`
+is explicit. A report produced during apply participates in rollback and is
+written only after library validation and catalog compilation succeed.
 
 ## Successful result
 
@@ -244,8 +264,8 @@ PDF, EPUB, or MOBI file beneath `Library/`, a title linked to its bibliography
 entry, and a separate `[PDF]`, `[EPUB]`, or `[MOBI]` attachment link. A pending item has an
 empty `file` field, a title linked to its individual bibliography entry
 with no visible status label, and an empty `Library/<topic.path>/` destination
-directory. No placeholder media file is created. No DOI, key, non-empty file
-path, or local file content is duplicated. The validator passes and
+directory. No placeholder media file is created. No DOI, ISBN, key, normalized
+catalog title, non-empty file path, or local file content is duplicated. The validator passes and
 `Catalog.pdf` is rebuilt in the library root. The private
 `catalog-updated` value records the successful intake's local calendar date; a
 dry run or rollback does not change it.

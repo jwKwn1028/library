@@ -33,9 +33,9 @@ SYNTHETIC_BIBLIOGRAPHY = """% Synthetic test bibliography.
   publisher = {Example Press},
   location  = {Example City},
   edition   = {2},
-  isbn      = {978-0-00-000000-0},
+  isbn      = {978-0-000-00000-2},
   url       = {https://example.test/~consortium/handbook},
-  keywords  = {PeripheralEsoteric, DigitalBooks},
+  keywords  = {Literature, DigitalBooks},
   file      = {}
 }
 """
@@ -92,11 +92,57 @@ class BibliographyExportTests(unittest.TestCase):
         self.assertIn("KW  - QuantumChemistry\r\n", exported)
         self.assertIn("TY  - BOOK\r\n", exported)
         self.assertIn("AU  - Example Research Consortium\r\n", exported)
-        self.assertIn("SN  - 978-0-00-000000-0\r\n", exported)
+        self.assertIn("SN  - 978-0-000-00000-2\r\n", exported)
         self.assertIn("UR  - https://example.test/~consortium/handbook\r\n", exported)
         self.assertNotIn("Library/", exported)
         self.assertNotIn("file         =", exported)
         self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+
+    def test_exports_albums_and_films_as_recording_types(self) -> None:
+        (self.root / "library.bib").write_text(
+            """% Topic: Music / Jazz
+
+@audio{example2026syntheticsessions,
+  author    = {{Example Ensemble} and Example, Ada},
+  title     = {Synthetic Sessions},
+  date      = {2026-01-15},
+  publisher = {Example Records},
+  url       = {https://music.example.test/album/synthetic},
+  keywords  = {Music, Jazz},
+  file      = {}
+}
+
+% Topic: Film / ScienceFiction
+
+@movie{director2026synthetichorizon,
+  author   = {Director, Dana},
+  title    = {Synthetic Horizon},
+  date     = {2026-03-01},
+  keywords = {Film, ScienceFiction},
+  file     = {}
+}
+
+@video{director2026syntheticcut,
+  author   = {Director, Dana},
+  title    = {Synthetic Horizon: The Long Cut},
+  date     = {2027},
+  keywords = {Film, ScienceFiction},
+  file     = {}
+}
+""",
+            encoding="utf-8",
+        )
+
+        result = self.run_export("--output", "exports/recordings.ris")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        exported = (self.root / "exports/recordings.ris").read_text(encoding="utf-8")
+        self.assertIn("TY  - SOUND\n", exported)
+        self.assertIn("TY  - MPCT\n", exported)
+        self.assertIn("TY  - VIDEO\n", exported)
+        self.assertIn("AU  - Example Ensemble\n", exported)
+        self.assertIn("AU  - Example, Ada\n", exported)
+        self.assertIn("PB  - Example Records\n", exported)
 
     def test_refuses_overwrite_without_force(self) -> None:
         output = self.root / "references.ris"
@@ -134,7 +180,7 @@ class BibliographyExportTests(unittest.TestCase):
     Multiline Handbook},
   date = 2022,
   publisher = {Example Press},
-  keywords = "PeripheralEsoteric, DigitalBooks",
+  keywords = "Literature, DigitalBooks",
   file = {}
 }
 """,
