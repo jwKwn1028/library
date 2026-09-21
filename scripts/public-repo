@@ -46,6 +46,7 @@ PUBLIC_FILES = {
     Path("scripts/intake-papers"),
     Path("scripts/lookup-media"),
     Path("scripts/public-repo"),
+    Path("scripts/search-bibliography"),
     Path("scripts/stage-papers"),
     Path("scripts/test"),
     Path("scripts/validate-library.sh"),
@@ -70,6 +71,7 @@ PUBLIC_FILES = {
     Path("tests/test_lookup_media.py"),
     Path("tests/test_manifest_schema.py"),
     Path("tests/test_public_repo.py"),
+    Path("tests/test_search_bibliography.py"),
     Path("tests/test_stage_papers.py"),
     Path("tests/test_validation.py"),
 }

@@ -149,6 +149,16 @@ The intake command takes an advisory `.paper-library.lock` for dry runs,
 status/topic reads, and applies. Do not bypass it; resolve a busy-library error
 or use a reviewed finite `--lock-timeout`.
 
+Use `scripts/search-bibliography TERM...` for offline searches of titles,
+authors/editors, citation keys, topics, and DOIs. It uses the shared parser and
+library lock; `--json`, `--pending`, and `--local` support structured results and
+attachment-state filtering. Every term must match somewhere in a record.
+
+When completed Inbox cleanup is requested, archive only the reviewed batch's
+retained prompts and sidecars under `Inbox/Processed/YYYY-MM-DD/`, preserving
+names and contents. Hold the shared lock and refuse destination collisions.
+Keep historical intake reports unchanged and canonical media under `Library/`.
+
 An apply that fails, or is interrupted by Ctrl-C, `SIGTERM`, or `SIGHUP`, rolls
 back its moves and writes; an interrupted apply exits with status 130. Report
 it as incomplete.

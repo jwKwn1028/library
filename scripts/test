@@ -15,12 +15,12 @@ done
 
 python3 -m json.tool schemas/intake-manifest.schema.json >/dev/null
 python3 -m unittest discover -s tests -v
-ruff check paperlib scripts/export-bibliography scripts/public-repo \
+ruff check paperlib scripts/export-bibliography scripts/public-repo scripts/search-bibliography \
   skills/music-film-intake/scripts/lookup_media.py \
   skills/paper-library-intake/scripts/fetch_pending.py \
   skills/paper-library-intake/scripts/intake_papers.py \
   skills/paper-library-intake/scripts/stage_papers.py tests
-ruff format --check paperlib scripts/export-bibliography scripts/public-repo \
+ruff format --check paperlib scripts/export-bibliography scripts/public-repo scripts/search-bibliography \
   skills/music-film-intake/scripts/lookup_media.py \
   skills/paper-library-intake/scripts/fetch_pending.py \
   skills/paper-library-intake/scripts/intake_papers.py \

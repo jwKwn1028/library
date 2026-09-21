@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Search the private canonical bibliography without changing library data."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import sys
+from typing import Any
+import unicodedata
+
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPOSITORY_ROOT))
+sys.path.insert(0, str(REPOSITORY_ROOT / "skills/paper-library-intake/scripts"))
+
+from intake_papers import IntakeError, library_lock  # noqa: E402
+from paperlib.bibtex import (  # noqa: E402
+    BibEntry,
+    BibtexError,
+    catalog_title,
+    parse_bibliography,
+    plain_text,
+)
+
+
+def normalize_query(value: str) -> str:
+    """Ignore letter case and combining accents in both queries and records."""
+
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFKD", value.casefold())
+        if not unicodedata.combining(character)
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Search library.bib titles, authors/editors, citation keys, topics, "
+            "and DOIs. Every whitespace-separated term must match somewhere "
+            "in a record; matching ignores case and combining accents."
+        )
+    )
+    parser.add_argument("query", nargs="+", metavar="TERM")
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=REPOSITORY_ROOT,
+        help="library root (default: repository containing this script)",
+    )
+    parser.add_argument("--json", action="store_true", help="emit a JSON array")
+    status = parser.add_mutually_exclusive_group()
+    status.add_argument(
+        "--pending", action="store_true", help="only records with an empty file field"
+    )
+    status.add_argument(
+        "--local", action="store_true", help="only records with an attachment path"
+    )
+    parser.add_argument(
+        "--lock-timeout",
+        type=float,
+        default=5.0,
+        metavar="SECONDS",
+        help="seconds to wait for the library lock (default: 5)",
+    )
+    args = parser.parse_args()
+    args.terms = [
+        normalize_query(term) for value in args.query for term in value.split()
+    ]
+    if not args.terms or any(not term for term in args.terms):
+        parser.error("provide at least one non-empty search term")
+    return args
+
+
+def search_record(entry: BibEntry) -> dict[str, Any]:
+    fields = entry.fields
+    topic = entry.topic or tuple(
+        part.strip() for part in fields.get("keywords", "").split(",") if part.strip()
+    )
+    attachment = fields.get("file", "").strip()
+    return {
+        "citation_key": entry.citation_key,
+        "entry_type": entry.entry_type,
+        "title": catalog_title(fields),
+        "author": plain_text(fields.get("author", "")),
+        "editor": plain_text(fields.get("editor", "")),
+        "date": fields.get("date") or fields.get("year", ""),
+        "topic": list(topic),
+        "doi": fields.get("doi", ""),
+        "file": attachment,
+        "pending": not attachment,
+    }
+
+
+def matches(record: dict[str, Any], terms: list[str]) -> bool:
+    values = [
+        normalize_query(record[field])
+        for field in ("citation_key", "title", "author", "editor", "doi")
+    ]
+    values.append(normalize_query("/".join(record["topic"])))
+    return all(any(term in value for value in values) for term in terms)
+
+
+def print_records(records: list[dict[str, Any]]) -> None:
+    print(f"Matches: {len(records)}")
+    for record in records:
+        status = "pending" if record["pending"] else "local"
+        date = f" ({record['date']})" if record["date"] else ""
+        print(f"\n{record['citation_key']} [{status}]{date}")
+        print(f"  {record['title']}")
+        for field in ("author", "editor"):
+            if record[field]:
+                print(f"  {field.capitalize()}: {record[field]}")
+        if record["topic"]:
+            print(f"  Topic: {'/'.join(record['topic'])}")
+        if record["doi"]:
+            print(f"  DOI: {record['doi']}")
+        if record["file"]:
+            print(f"  File: {record['file']}")
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        root = args.root.expanduser().resolve()
+        if not root.is_dir():
+            raise IntakeError(f"library root does not exist: {root}")
+        with library_lock(root, args.lock_timeout):
+            bibliography = root / "library.bib"
+            if not bibliography.is_file():
+                raise IntakeError(
+                    "library.bib is missing; run scripts/init-library first"
+                )
+            entries = parse_bibliography(
+                bibliography.read_text(encoding="utf-8"), require_entries=False
+            )
+        records = []
+        for entry in sorted(entries, key=lambda item: item.citation_key):
+            record = search_record(entry)
+            if args.pending and not record["pending"]:
+                continue
+            if args.local and record["pending"]:
+                continue
+            if matches(record, args.terms):
+                records.append(record)
+        if args.json:
+            print(json.dumps(records, ensure_ascii=False, indent=2))
+        else:
+            print_records(records)
+        return 0
+    except KeyboardInterrupt:
+        print("ERROR: interrupted", file=sys.stderr)
+        return 130
+    except (BibtexError, IntakeError, OSError, UnicodeError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

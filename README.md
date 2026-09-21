@@ -15,6 +15,7 @@ A reusable Typst catalog for papers, books, albums, and films. See the
 ```sh
 ./scripts/stage-papers /path/to/document.pdf [--apply]
 ./scripts/intake-papers --manifest /tmp/intake.json [--apply]
+./scripts/search-bibliography embedding
 ./scripts/validate-library.sh
 ./scripts/test
 ./scripts/export-bibliography

@@ -10,6 +10,7 @@ agent-assisted document intake.
 - [Requirements](#requirements)
 - [First-time setup](#first-time-setup)
 - [Repository layout](#repository-layout)
+- [Search the bibliography](#search-the-bibliography)
 - [Intake a library item](#intake-a-library-item)
 - [Add a metadata-only reading list](#add-a-metadata-only-reading-list)
 - [Attach a downloaded pending item](#attach-a-downloaded-pending-item)
@@ -191,6 +192,7 @@ paper-library/
 │   ├── intake-papers
 │   ├── lookup-media
 │   ├── public-repo
+│   ├── search-bibliography
 │   ├── stage-papers
 │   ├── test
 │   └── validate-library.sh
@@ -220,6 +222,44 @@ Only the framework on the left side of the public/private model belongs in the
 public repository. An ignored file is also not backed up by Git; arrange a
 separate private backup for the working library.
 
+## Search the bibliography
+
+Search the canonical `library.bib` by title (including subtitle and numbered
+series), author or editor, citation key, topic path, or DOI:
+
+```sh
+./scripts/search-bibliography embedding
+./scripts/search-bibliography "electronic structure" --pending
+./scripts/search-bibliography synthetic handbook --local
+./scripts/search-bibliography example2024study --json
+```
+
+Every whitespace-separated term must occur in at least one searchable field
+of the same record. Terms can match different fields. Matching uses literal
+substrings, ignores letter case and combining accents, and removes BibTeX
+grouping braces from displayed metadata. Shell quotes group arguments; they do
+not enable exact-phrase matching. Topics accept PascalCase fragments or separate
+words, so `ElectronicStructure` and `electronic structure` both work.
+
+Results are sorted by citation key and include the title, creators, date,
+topic, DOI, and local attachment path when present. `--pending` selects empty
+`file` fields; `--local` selects populated paths without checking the media on
+disk. These options are mutually exclusive. Without either, all record types
+and attachment states are searched, including books, music, and films.
+
+`--json` prints only an array of objects with `citation_key`, `entry_type`,
+`title`, `author`, `editor`, `date`, `topic` (an array of components), `doi`,
+`file`, and `pending` fields. Missing text fields are empty strings. Results
+contain private metadata; save them only in an ignored location such as
+`reports/` when needed.
+
+The command runs offline, reads only `library.bib`, and uses the shared library
+lock. It does not update the bibliography, catalog, or documents. Use
+`--root PATH` to search a different library and `--lock-timeout SECONDS` to change the
+default five-second lock wait. No matches, including an empty bibliography,
+is a successful search (exit 0, an empty JSON array or `Matches: 0`). Missing
+queries, invalid options, parsing failures, and unavailable libraries exit 2.
+
 ## Intake a library item
 
 ### 1. Stage only the items being processed
@@ -245,6 +285,15 @@ exports elsewhere in the root are ignored. Intake, staging, and `fetch-pending
 Only files beneath `Library/` are canonical attachments. For several items going to one topic, include them
 in one manifest; for several topics, prepare one manifest per topic and submit
 all of them in the same intake command.
+
+After a successful intake, explicitly reviewed citation prompts and retained
+sidecars may be moved into `Inbox/Processed/<batch-date>/`, using an ISO date
+such as `2026-01-15`. Preserve their names and contents, refuse destination
+collisions, and hold the shared `.paper-library.lock` during the move. Only
+archive completed batches; leave new arrivals at the top of `Inbox/`.
+Historical JSON reports retain the paths recorded at intake time. This is a
+manual housekeeping convention, not an automatic part of intake; sidecars are
+still retained in place by default. Canonical media remains under `Library/`.
 
 ### 2. Recover and verify identity
 
@@ -272,7 +321,8 @@ article, preprint, book, correction, supplement, or another distinct object.
 Search the existing private catalog before preparing an addition:
 
 ```sh
-rg -n -i 'distinctive title fragment|bare-doi' library.bib main.typ
+./scripts/search-bibliography "distinctive title fragment"
+./scripts/search-bibliography "bare-doi"
 ```
 
 The engine also rejects duplicate citation keys, DOI values, normalized titles,
@@ -1428,6 +1478,7 @@ files.
 | --- | --- | --- |
 | `scripts/init-library` | Create missing private root sources and `Library/` | Creates missing files/directories only |
 | `scripts/install-hooks` | Select checked-in Git hooks for this clone | Changes local Git config only |
+| `scripts/search-bibliography TERM... [--pending\|--local] [--json]` | Search titles, creators, citation keys, topics, and DOIs | No |
 | `scripts/export-bibliography` | Export private metadata to `exports/library.ris` | Writes derived RIS output only |
 | `scripts/fetch-pending --key KEY [--apply]` | Discover or stage an accessible pending PDF | Writes only ignored `Inbox/` with `--apply` |
 | `scripts/fetch-pending --key KEY --browser` | Open the record's publisher page in your browser | No |
@@ -1459,6 +1510,7 @@ Use built-in help for current command syntax:
 
 ```sh
 ./scripts/export-bibliography --help
+./scripts/search-bibliography --help
 ./scripts/stage-papers --help
 ./scripts/intake-papers --help
 ./scripts/intake-papers status --help
